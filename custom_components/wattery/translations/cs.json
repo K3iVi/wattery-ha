@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Spárovat s wattery",
+        "description": "V aplikaci wattery otevřete Nastavení → Lokální spojení → Spárovat zařízení a opište kód (platí 15 minut). Vyberte střídač z integrace Solarman.",
+        "data": {
+          "code": "Párovací kód",
+          "device": "Střídač (Solarman)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Spárovat znovu",
+        "description": "Spojení s wattery bylo odpojeno. V aplikaci wattery vytvořte nový párovací kód a zadejte ho sem.",
+        "data": {
+          "code": "Párovací kód"
+        }
+      }
+    },
+    "error": {
+      "read_failed": "Ze střídače se nepodařilo přečíst sériové číslo. Funguje integrace Solarman?",
+      "cannot_connect": "Server wattery je nedostupný. Zkuste to za chvíli.",
+      "bad_code": "Neplatný nebo prošlý párovací kód.",
+      "sn_mismatch": "Tento střídač nepatří k elektrárně, pro kterou byl kód vystaven.",
+      "unsupported": "Tenhle typ elektrárny zatím lokální spojení nepodporuje.",
+      "pair_failed": "Párování se nepovedlo."
+    },
+    "abort": {
+      "no_solarman": "Nejdřív nainstalujte a nastavte integraci Solarman (ha-solarman) — přes ni se čte střídač.",
+      "already_configured": "Tento střídač už je spárovaný.",
+      "other_inverter": "Vybraný střídač je jiný než ten, se kterým byla integrace spárovaná.",
+      "reauth_successful": "Spárováno znovu."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Lokální spojení",
+        "state": {
+          "starting": "Spouští se",
+          "online": "Online",
+          "error": "Chyba",
+          "revoked": "Odpojeno"
+        }
+      }
+    }
+  }
+}

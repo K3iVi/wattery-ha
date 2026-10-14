@@ -1,0 +1,12 @@
+{
+  "domain": "wattery",
+  "name": "wattery",
+  "codeowners": ["@K3iVi"],
+  "config_flow": true,
+  "documentation": "https://github.com/K3iVi/wattery-ha",
+  "integration_type": "device",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/K3iVi/wattery-ha/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

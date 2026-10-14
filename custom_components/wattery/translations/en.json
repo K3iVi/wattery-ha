@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Pair with wattery",
+        "description": "In the wattery app open Settings → Local connection → Pair device and enter the code (valid for 15 minutes). Pick the inverter from the Solarman integration.",
+        "data": {
+          "code": "Pairing code",
+          "device": "Inverter (Solarman)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Pair again",
+        "description": "The connection was revoked in wattery. Create a new pairing code in the wattery app and enter it here.",
+        "data": {
+          "code": "Pairing code"
+        }
+      }
+    },
+    "error": {
+      "read_failed": "Could not read the serial number from the inverter. Is the Solarman integration working?",
+      "cannot_connect": "The wattery server is unreachable. Try again later.",
+      "bad_code": "Invalid or expired pairing code.",
+      "sn_mismatch": "This inverter does not belong to the plant the code was issued for.",
+      "unsupported": "This plant type does not support the local connection yet.",
+      "pair_failed": "Pairing failed."
+    },
+    "abort": {
+      "no_solarman": "Install and set up the Solarman integration (ha-solarman) first — it is used to read the inverter.",
+      "already_configured": "This inverter is already paired.",
+      "other_inverter": "The selected inverter differs from the one this entry was paired with.",
+      "reauth_successful": "Paired again."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Local connection",
+        "state": {
+          "starting": "Starting",
+          "online": "Online",
+          "error": "Error",
+          "revoked": "Revoked"
+        }
+      }
+    }
+  }
+}
