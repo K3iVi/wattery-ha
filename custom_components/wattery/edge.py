@@ -1,12 +1,19 @@
 """Jádro klienta lokálního spojení wattery — bez závislosti na Home Assistantu (testovatelné samostatně).
 
-Protokol (server monitoring.wattery.cz, `deye/edge.py`):
+Protokol (server monitoring.wattery.cz, `deye/edge.py` + `deye/edge_cmd.py`):
   POST /api/edge/v1/pair  {code, kind, sn, clientVer, label}  → {token, readPlan, nextPollS}
-  POST /api/edge/v1/sync  (Bearer token) {client, reads: [{fc, addr, values, ts, sn}]}
-                          → {readPlan, nextPollS, commands, accepted, ignored}
+  POST /api/edge/v1/sync  (Bearer token) {client: {ver, backend, ctl}, reads: [{fc, addr, values, ts, sn}], results}
+                          → {readPlan, nextPollS, commands, control, accepted, ignored}
 
 Co a jak často číst, určuje server (`readPlan`) — nový registr = změna jen na serveru.
-Tahle verze jen ČTE: příkazy (`commands`) ignoruje, do střídače nic nezapisuje.
+
+Řízení (od 0.2.0): server pošle v `commands` Modbus příkazy platformy (místo přes Deye cloud):
+  {id, type: 'modbus', sn, fc: 3|4|16, addr, count | values, expiresInS}
+Čtení (FC03/04) klient provede vždy. Zápis (FC16) jen se zapnutým přepínačem „Řízení z wattery“ (`control_enabled`,
+výchozí vypnuto), jen do registrů z DEYE_PROFILE (stejný profil má server — `edge_deye.EDGE_WRITE_PROFILE`, shodu hlídá
+test), nejvýš RATE_PER_MIN / RATE_PER_H zápisů s odstupem WRITE_GAP_S a hned po zápisu zpětné čtení. Výsledek
+{id, ok, err | values | readBack, rbErr, dur} jde serveru hned dalším sync. Přepínač klient hlásí v každém sync
+(`client.ctl`) — vypnutý = server řídí přes Deye cloud jako dřív.
 """
 from __future__ import annotations
 
@@ -24,11 +31,21 @@ HEARTBEAT_S = 30              # bez nových dat se ozvat aspoň jednou za 30 s
 POLL_MIN_S, POLL_MAX_S = 5, 300
 BACKOFF_S = 300               # server odmítá (např. střídač už k elektrárně nepatří) → zkusit za 5 min
 MAX_BLOCK = 125               # FC03/FC04 čte nejvýš 125 registrů
+# Řízení
+FAST_POLL_S, FAST_WINDOW_S = 1.5, 20   # po příkazu se chvíli ptát rychle (další blok TOU čeká na výsledek předchozího)
+WRITE_GAP_S = 1.0             # mezi dvěma zápisy do střídače aspoň 1 s
+RATE_PER_MIN, RATE_PER_H = 15, 60      # pojistka proti zahlcení střídače zápisy
+MAX_COMMANDS = 8              # příkazů z jedné odpovědi
+MAX_RESULTS = 16              # výsledků v jednom sync (stejně jako server)
+KEEP_RESULTS = 32             # neodeslané výsledky (server nedostupný) — starší by server stejně zahodil
+SEEN_IDS = 64                 # pamatovat si posledních 64 provedených příkazů (žádný se neprovede dvakrát)
+FLUSH_ROUNDS = 3              # výsledky hned dalším sync; odpověď může nést další příkaz
 
 # Stav pro senzor v HA.
 STARTING, ONLINE, ERROR, REVOKED = 'starting', 'online', 'error', 'revoked'
 
 ReadBlock = Callable[[int, int, int], Awaitable[list]]          # (fc, addr, count) → hodnoty u16
+WriteBlock = Callable[[int, list], Awaitable[None]]             # (addr, hodnoty) → zápis FC16
 Post = Callable[[str, dict, 'str | None'], Awaitable[tuple]]     # (cesta, tělo, token) → (http kód, json)
 
 
@@ -62,14 +79,83 @@ def clean_plan(plan) -> list:
     return out
 
 
+# ── Co smí wattery do střídače zapsat ───────────────────────────────────────
+
+def _hhmm(v):
+    return v // 100 <= 23 and v % 100 <= 59
+
+
+def _tou_flags(v):
+    return v & ~0x23 == 0          # bit0 nabíjení ze sítě, bit1 z generátoru, bit5 (0x20) prodej v okně
+
+
+def _clock(addr):
+    def ok(v):
+        hi, lo = v >> 8, v & 0xFF
+        if addr == 62:
+            return 20 <= hi <= 60 and 1 <= lo <= 12          # rok od 2000 | měsíc
+        if addr == 63:
+            return 1 <= hi <= 31 and lo <= 23                # den | hodina
+        return hi <= 59 and lo <= 59                         # minuta | sekunda
+    return ok
+
+
+# Deye SG04LP3 / SG05LP3: vše, co platforma wattery zapisuje (spot — okna TOU, proudy, max. prodej, Low Batt, hodiny).
+# Adresa → (min, max, kontrola hodnoty). Blok FC16 projde jen celý; jiný registr klient nezapíše, ať server pošle cokoli.
+DEYE_PROFILE = {
+    108: (0, 350, None),                  # max. nabíjecí proud (A)
+    109: (0, 350, None),                  # max. vybíjecí proud (A)
+    117: (1, 95, None),                   # Low Batt SOC (%)
+    127: (0, 100, None),                  # nabíjení ze sítě — start SOC (%)
+    128: (0, 350, None),                  # nabíjení ze sítě — proud (A)
+    129: (0, 1, None),                    # nabíjení z generátoru
+    130: (0, 1, None),                    # nabíjení ze sítě
+    133: (0, 2, None),                    # režim gen-portu
+    135: (0, 100, None),                  # Smart Load — vypnout při SOC (%)
+    137: (0, 100, None),                  # Smart Load — zapnout při SOC (%)
+    142: (0, 2, None),                    # pracovní režim
+    143: (0, 24000, None),                # max. prodej do sítě (W)
+    145: (0, 1, None),                    # prodej přebytku (Solar Sell)
+    146: (0, 0xFF, None),                 # TOU zapnuto + dny
+    **{148 + i: (0, 2359, _hhmm) for i in range(6)},          # TOU časy (HHMM)
+    **{154 + i: (0, 0xFFFF, None) for i in range(6)},         # TOU výkony (W)
+    **{166 + i: (0, 100, None) for i in range(6)},            # TOU SOC (%)
+    **{172 + i: (0, 0x23, _tou_flags) for i in range(6)},     # TOU nabíjení / prodej v okně
+    62: ((20 << 8) | 1, (60 << 8) | 12, _clock(62)),          # hodiny: rok | měsíc
+    63: ((1 << 8) | 0, (31 << 8) | 23, _clock(63)),           # den | hodina
+    64: (0, (59 << 8) | 59, _clock(64)),                      # minuta | sekunda
+}
+
+
+def write_problem(addr, values) -> str | None:
+    """None = blok FC16 smí klient zapsat; jinak důvod."""
+    if not isinstance(values, list) or not 1 <= len(values) <= 123:
+        return 'prázdný nebo příliš dlouhý blok'
+    for i, v in enumerate(values):
+        spec = DEYE_PROFILE.get(addr + i)
+        if spec is None:
+            return f'registr {addr + i} mimo profil'
+        lo, hi, ok = spec
+        if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi or (ok and not ok(v)):
+            return f'registr {addr + i}: hodnota {v} mimo meze'
+    return None
+
+
+def _u16_list(v, n) -> bool:
+    return (isinstance(v, list) and len(v) == n
+            and all(isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 0xFFFF for x in v))
+
+
 class EdgeRunner:
-    """Smyčka klienta: přečte bloky, které jsou na řadě, a pošle je serveru."""
+    """Smyčka klienta: přečte bloky, které jsou na řadě, pošle je serveru a provede jeho příkazy."""
 
     def __init__(self, *, read_block: ReadBlock, post: Post, token: str, read_plan, version: str,
                  backend: str, next_poll_s=10, on_status: Callable[['EdgeRunner'], None] | None = None,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, write_block: WriteBlock | None = None,
+                 sn: str | None = None, sleep: Callable[[float], Awaitable] = asyncio.sleep):
         self._read_block, self._post, self._token = read_block, post, token
         self._version, self._backend, self._on_status, self._clock = version, backend, on_status, clock
+        self._write_block, self._sn, self._sleep = write_block, (str(sn) if sn else None), sleep
         self.plan = clean_plan(read_plan)
         self.next_poll_s = self._clamp_poll(next_poll_s)
         self._last_read: dict = {}           # (fc, addr, count) → čas posledního (pokusu o) čtení
@@ -80,6 +166,16 @@ class EdgeRunner:
         self.last_sync_at: float | None = None
         self.last_accepted: int | None = None
         self.read_errors = 0
+        # řízení
+        self.control_enabled = False         # přepínač „Řízení z wattery“ (HA, výchozí vypnuto)
+        self.server_control: str | None = None   # režim řízení na serveru: None / 'test' / 'on'
+        self.commands_done = 0
+        self.last_command: str | None = None
+        self._pending: list = []             # výsledky příkazů k odeslání
+        self._done: dict = {}                # id → výsledek posledních SEEN_IDS příkazů
+        self._writes: list = []              # časy zápisů (limit za minutu / hodinu)
+        self._last_write = 0.0
+        self._fast_until = 0.0
 
     @staticmethod
     def _clamp_poll(v) -> float:
@@ -96,8 +192,20 @@ class EdgeRunner:
             except Exception:  # noqa: BLE001 — senzor nesmí shodit smyčku
                 _LOGGER.exception('wattery: chyba při aktualizaci stavu')
 
+    def set_control(self, enabled: bool) -> None:
+        """Přepínač „Řízení z wattery“. Změnu nahlásit serveru hned v příštím kole (i bez dat), ať podle ní
+        směruje příkazy (vypnuto → Deye cloud)."""
+        if bool(enabled) != self.control_enabled:
+            self.control_enabled = bool(enabled)
+            self._last_sync = 0.0
+
+    def poll_s(self) -> float:
+        """Za jak dlouho další kolo: po příkazu rychle, jinak podle serveru."""
+        return FAST_POLL_S if self._clock() < self._fast_until else self.next_poll_s
+
     async def tick(self) -> None:
-        """Jedno kolo: bloky na řadě → přečíst → poslat. Vyhodí Revoked, když server token nezná."""
+        """Jedno kolo: bloky na řadě → přečíst → poslat (+ výsledky příkazů) → provést příkazy z odpovědi.
+        Vyhodí Revoked, když server token nezná."""
         now = self._clock()
         if now < self._backoff_until:
             return
@@ -121,28 +229,49 @@ class EdgeRunner:
             if b['sn']:
                 rd['sn'] = b['sn']
             reads.append(rd)
-        if not reads and now - self._last_sync < HEARTBEAT_S:
+        # Bez dat se ozvat jednou za HEARTBEAT_S; se zapnutým řízením na serveru á nextPollS (čekají tam příkazy).
+        idle_s = self.next_poll_s - 0.5 if self.server_control else HEARTBEAT_S
+        if not reads and not self._pending and now >= self._fast_until and now - self._last_sync < idle_s:
             return
-        body = {'client': {'ver': self._version, 'backend': self._backend}, 'reads': reads}
+        await self._sync(now, reads)
+        for _ in range(FLUSH_ROUNDS):       # výsledky hned — volající na serveru na ně čeká
+            if not self._pending or self.status != ONLINE:
+                break
+            await self._sync(self._clock(), [])
+
+    async def _sync(self, now, reads) -> None:
+        body = {'client': {'ver': self._version, 'backend': self._backend,
+                           'ctl': 'on' if self.control_enabled else 'off'}, 'reads': reads}
+        sent = self._pending[:MAX_RESULTS]
+        if sent:
+            body['results'] = sent
         try:
             code, res = await self._post(SYNC_PATH, body, self._token)
-        except Exception as e:  # noqa: BLE001 — síť: zkusit příště, data z tohoto kola propadnou
+        except Exception as e:  # noqa: BLE001 — síť: zkusit příště (čtení z tohoto kola propadnou, výsledky ne)
             self._last_sync = now
             self._set(ERROR, f'server nedostupný: {e}')
             return
         self._last_sync = now
         res = res if isinstance(res, dict) else {}
         if code == 200:
+            del self._pending[:len(sent)]
             plan = clean_plan(res.get('readPlan'))
             if plan:
                 self.plan = plan
             if 'nextPollS' in res:
                 self.next_poll_s = self._clamp_poll(res['nextPollS'])
-            if res.get('commands'):
-                _LOGGER.info('wattery: server poslal %d příkaz(ů) — tahle verze jen čte, ignoruji',
-                             len(res['commands']))
+            self.server_control = res.get('control') if res.get('control') in ('test', 'on') else None
             self.last_sync_at, self.last_accepted = now, res.get('accepted')
             self._set(ONLINE, self.last_error if not reads else None)
+            cmds = res.get('commands')
+            if isinstance(cmds, list) and cmds:
+                received = self._clock()
+                self._fast_until = received + FAST_WINDOW_S
+                for cmd in cmds[:MAX_COMMANDS]:
+                    r = await self._command(cmd, received)
+                    if r is not None:
+                        self._pending.append(r)
+                del self._pending[:-KEEP_RESULTS]
         elif code == 401:
             self._set(REVOKED, 'spojení bylo ve wattery odpojeno — spárujte znovu')
             raise Revoked()
@@ -152,9 +281,96 @@ class EdgeRunner:
         else:
             if code in (409, 403):
                 self._backoff_until = now + BACKOFF_S
+            if code == 400:
+                self._pending.clear()        # server tělo odmítl — výsledky by se odmítaly pořád dokola
             self._set(ERROR, res.get('message') or res.get('error') or f'HTTP {code}')
 
-    async def run(self, sleep=asyncio.sleep) -> None:
+    async def _command(self, cmd, received) -> dict | None:
+        """Jeden příkaz serveru → výsledek pro `results` (None = příkaz bez id, není komu odpovědět)."""
+        cid = cmd.get('id') if isinstance(cmd, dict) else None
+        if not isinstance(cid, str) or not cid or len(cid) > 40:
+            _LOGGER.warning('wattery: příkaz bez platného id — ignoruji')
+            return None
+        if cid in self._done:                # už provedený → jen znovu výsledek, do střídače podruhé nic
+            return self._done[cid]
+        try:
+            out = await self._execute(cmd, received)
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.exception('wattery: chyba při provádění příkazu %s', cid)
+            out = {'ok': False, 'err': f'exec: {e}'[:200]}
+        out = {'id': cid, **out, 'dur': round(self._clock() - received, 2)}
+        self._done[cid] = out
+        while len(self._done) > SEEN_IDS:
+            self._done.pop(next(iter(self._done)))
+        self.commands_done += 1
+        what = f'FC{cmd.get("fc")} {cmd.get("addr")}' + (f' = {cmd["values"]}' if cmd.get('values') else '')
+        self.last_command = f'{what}: ' + ('OK' if out['ok'] else out.get('err', 'chyba'))
+        (_LOGGER.info if cmd.get('fc') == 16 or not out['ok'] else _LOGGER.debug)('wattery: příkaz %s', self.last_command)
+        return out
+
+    async def _execute(self, cmd, received) -> dict:
+        if cmd.get('type', 'modbus') != 'modbus':
+            return {'ok': False, 'err': 'bad-command: neznámý typ'}
+        if self._sn and str(cmd.get('sn') or '') != self._sn:
+            return {'ok': False, 'err': 'foreign-sn'}
+        fc, addr = cmd.get('fc'), cmd.get('addr')
+        if not isinstance(fc, int) or not isinstance(addr, int) or isinstance(addr, bool) or not 0 <= addr <= 0xFFFF:
+            return {'ok': False, 'err': 'bad-command: fc / addr'}
+        try:
+            ttl = float(cmd.get('expiresInS') or 10)
+        except (TypeError, ValueError):
+            ttl = 10.0
+        if fc in (3, 4):                     # čtení: vždy (nic nemění)
+            count = cmd.get('count')
+            if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= MAX_BLOCK:
+                return {'ok': False, 'err': 'bad-command: count'}
+            if self._clock() - received > ttl:
+                return {'ok': False, 'err': 'expired'}
+            try:
+                vals = [int(v) for v in await self._read_block(fc, addr, count)]
+            except Exception as e:  # noqa: BLE001 — ha-solarman: timeout, spojení
+                return {'ok': False, 'err': f'exec: {e}'[:200]}
+            if not _u16_list(vals, count):
+                return {'ok': False, 'err': 'exec: čtení vrátilo jiný počet registrů'}
+            return {'ok': True, 'values': vals}
+        if fc != 16:
+            return {'ok': False, 'err': f'bad-command: FC{fc}'}
+        values = cmd.get('values')
+        if not self.control_enabled:
+            return {'ok': False, 'err': 'local-off'}
+        prob = write_problem(addr, values)
+        if prob:
+            return {'ok': False, 'err': f'not-allowed: {prob}'}
+        if self._write_block is None:
+            return {'ok': False, 'err': 'exec: zápis není k dispozici'}
+        now = self._clock()
+        self._writes = [t for t in self._writes if now - t < 3600]
+        if sum(1 for t in self._writes if now - t < 60) >= RATE_PER_MIN or len(self._writes) >= RATE_PER_H:
+            return {'ok': False, 'err': 'rate-limit'}
+        gap = self._last_write + WRITE_GAP_S - now
+        if gap > 0:
+            await self._sleep(gap)
+        if self._clock() - received > ttl:
+            return {'ok': False, 'err': 'expired'}
+        self._writes.append(self._clock())
+        try:
+            await self._write_block(addr, list(values))
+        except Exception as e:  # noqa: BLE001 — ha-solarman: timeout, spojení, odmítnutí
+            return {'ok': False, 'err': f'exec: {e}'[:200]}
+        finally:
+            self._last_write = self._clock()
+        out = {'ok': True}
+        try:                                 # zpětné čtení — posoudí server (hodiny se mezitím posunou)
+            rb = [int(v) for v in await self._read_block(3, addr, len(values))]
+            if not _u16_list(rb, len(values)):
+                raise ValueError('jiný počet registrů')
+            out['readBack'] = rb
+        except Exception as e:  # noqa: BLE001
+            out['rbErr'] = str(e)[:120] or type(e).__name__
+        return out
+
+    async def run(self, sleep=None) -> None:
+        sleep = sleep or self._sleep
         while True:
             try:
                 await self.tick()
@@ -163,4 +379,4 @@ class EdgeRunner:
             except Exception:  # noqa: BLE001
                 _LOGGER.exception('wattery: neočekávaná chyba ve smyčce')
                 self._set(ERROR, 'neočekávaná chyba (viz log)')
-            await sleep(self.next_poll_s)
+            await sleep(self.poll_s())

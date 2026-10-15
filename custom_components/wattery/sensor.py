@@ -6,11 +6,10 @@ from datetime import datetime, timezone
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import WatteryConfigEntry
-from .const import CONF_SN, DOMAIN, VERSION
+from . import WatteryConfigEntry, device_info
+from .const import CONF_SN
 from .edge import ERROR, ONLINE, REVOKED, STARTING
 
 
@@ -32,9 +31,7 @@ class WatteryStatusSensor(SensorEntity):
         self._entry = entry
         sn = entry.data[CONF_SN]
         self._attr_unique_id = f'{sn}_status'
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, sn)}, name=f'wattery {sn}', manufacturer='wattery',
-                                            model='Lokální spojení', sw_version=VERSION,
-                                            configuration_url='https://monitoring.wattery.cz')
+        self._attr_device_info = device_info(sn)
 
     async def async_added_to_hass(self) -> None:
         listeners = self._entry.runtime_data.listeners
@@ -53,4 +50,8 @@ class WatteryStatusSensor(SensorEntity):
             'last_error': r.last_error,
             'read_errors': r.read_errors,
             'blocks': [f"{b['name']} {b['addr']}/{b['count']} / {b['everyS']} s" for b in r.plan],
+            'control': r.control_enabled,
+            'server_control': r.server_control,
+            'commands': r.commands_done,
+            'last_command': r.last_command,
         }

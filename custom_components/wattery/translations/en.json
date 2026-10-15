@@ -43,6 +43,11 @@
           "revoked": "Revoked"
         }
       }
+    },
+    "switch": {
+      "control": {
+        "name": "Control from wattery"
+      }
     }
   }
 }

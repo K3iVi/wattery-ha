@@ -43,6 +43,11 @@
           "revoked": "Odpojeno"
         }
       }
+    },
+    "switch": {
+      "control": {
+        "name": "Řízení z wattery"
+      }
     }
   }
 }
