@@ -549,6 +549,33 @@ def profile_data():
     except ValueError:
         pass
     check('profil: id bez cesty, neznámá kontrola = neplatný profil', not bad, bad)
+    # Profil MQTT (A3b): položky s cestou, vzory {0..N} a {n}, dávka s maxPaths, persist.
+    m = wp.compile_profile({'id': 'test-mqtt@1', 'transport': 'mqtt', 'limits': {'maxPaths': 3},
+                            'write': [{'path': 'settings/0/X/Mode', 'check': 'enum', 'values': [0, 4], 'persist': True},
+                                      {'path': 'settings/0/X/Slot/{0..2}/Soc', 'min': 0, 'max': 100, 'int': True},
+                                      {'path': 'dev/{n}/Current', 'min': 6.0, 'max': 32.0}]})
+    P = lambda p, v: wp.path_problem(m, p, v)
+    check('profil MQTT: vzory, celá čísla, desetinná čísla, enum; cizí cesta / text / NaN ne',
+          P('settings/0/X/Mode', 4) is None and P('settings/0/X/Slot/2/Soc', 55) is None
+          and P('dev/17/Current', 6.5) is None and P('settings/0/X/Mode', 1) and P('settings/0/X/Slot/3/Soc', 5)
+          and P('settings/0/X/Slot/1/Soc', 5.5) and P('dev/x/Current', 10) and P('dev/1/Current', 32.5)
+          and P('dev/1/Current', 'x') and P('dev/1/Current', float('nan')) and P('dev/1/Current', True)
+          and P('settings/0/X/Mode\n', 4))
+    check('profil MQTT: dávka do maxPaths, bez opakování cesty; persist jen u označených',
+          wp.batch_problem(m, [['settings/0/X/Slot/0/Soc', 1], ['settings/0/X/Mode', 4]]) is None
+          and wp.batch_problem(m, [['dev/1/Current', 6]] * 2) and wp.batch_problem(m, [])
+          and wp.batch_problem(m, [['dev/%d/Current' % i, 6] for i in range(4)])
+          and wp.persistent(m, 'settings/0/X/Mode') and not wp.persistent(m, 'dev/1/Current'))
+    bad = []
+    for prof in ({'id': 'x@1', 'transport': 'mqtt', 'write': [{'path': 'a', 'min': 0, 'max': 1}]},
+                 {'id': 'x@1', 'transport': 'mqtt', 'limits': {'maxPaths': 1}, 'write': [{'path': 'a/#', 'min': 0, 'max': 1}]},
+                 {'id': 'x@1', 'write': [{'path': 'a', 'min': 0, 'max': 1}]}):
+        try:
+            wp.compile_profile(prof)
+            bad.append(prof)
+        except ValueError:
+            pass
+    check('profil MQTT: bez maxPaths / zástupný znak / cesta v profilu modbus = neplatný', not bad, bad[:1])
 
 
 def parity():

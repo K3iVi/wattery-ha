@@ -17,10 +17,16 @@ Kontroly: min/max (když jsou) A pojmenovaná `check`:
   Deye: rok|měsíc, den|hodina, minuta|sekunda) · enum {values} · zero (jen 0) · s32 / u32 {words: lo-hi|hi-lo}
   (dva registry, min/max na celé číslo).
 Neznámá kontrola, překryv položek nebo nepokrytý blok = profil neplatný (ValueError) → klient nic nezapíše.
+
+Profil MQTT (`"transport": "mqtt"`, Victron GX): položky {path, check: range|enum, min/max | values, int?, persist?}
+  místo adres; cesta je relativní k `W/<portal>/` a smí mít vzory `{0..47}` (číslo z rozsahu) a `{n}` (libovolná
+  instance). Hodnoty jsou čísla (i desetinná), `int: true` = jen celá. Platí první položka, jejíž vzor cestu pokryje.
+  `limits.maxPaths` (povinné) = nejvíc cest v jedné dávce, `limits.persistPerDay` = denní limit trvalých nastavení.
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 
@@ -28,6 +34,10 @@ ID_RE = re.compile(r'^[a-z0-9][a-z0-9-]{0,40}@[0-9]{1,4}$')
 MAX_BLOCK = 123                       # FC16: nejvýš 123 registrů
 _REG_CHECKS = ('range', 'hhmm', 'mask', 'clock', 'enum', 'zero')
 _WIDE_CHECKS = ('s32', 'u32')
+_PATH_TOKEN = re.compile(r'(\{[^{}]*\})')
+_PATH_RANGE = re.compile(r'\{([0-9]{1,4})\.\.([0-9]{1,4})\}')
+_PATH_CHARS = re.compile(r'[A-Za-z0-9_./{}-]+')
+MAX_PATH_LEN = 200
 
 
 def load(profile_id: str, directory: str) -> dict:
@@ -101,17 +111,110 @@ def _wide_check(spec: dict, what: str):
     return ok
 
 
+def _num(v, what):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError(f'{what}: čekám číslo, je {v!r}')
+    return v
+
+
+def _path_re(pat, what):
+    """Vzor cesty MQTT → regulární výraz (celá cesta)."""
+    if (not isinstance(pat, str) or not 0 < len(pat) <= MAX_PATH_LEN or not _PATH_CHARS.fullmatch(pat)
+            or pat.startswith('/') or pat.endswith('/') or '//' in pat):
+        raise ValueError(f'{what}: neplatná cesta {pat!r}')
+    out = ''
+    for tok in _PATH_TOKEN.split(pat):
+        if tok == '{n}':
+            out += '[0-9]+'
+        elif tok.startswith('{'):
+            m = _PATH_RANGE.fullmatch(tok)
+            if not m or not 0 <= int(m[2]) - int(m[1]) <= 1000:
+                raise ValueError(f'{what}: neplatný vzor {tok!r}')
+            out += '(?:' + '|'.join(str(k) for k in range(int(m[1]), int(m[2]) + 1)) + ')'
+        elif '{' in tok or '}' in tok or '..' in tok:
+            raise ValueError(f'{what}: neplatný vzor v cestě {pat!r}')
+        else:
+            out += re.escape(tok)
+    return re.compile(out)
+
+
+def _path_check(spec: dict, what: str):
+    """Kontrola hodnoty jedné cesty MQTT → funkce (cesta, hodnota) -> důvod | None."""
+    name = spec.get('check', 'range')
+    as_int = spec.get('int', False)
+    if not isinstance(as_int, bool):
+        raise ValueError(f'{what}: int musí být true/false')
+    if name == 'range':
+        if 'min' not in spec or 'max' not in spec:
+            raise ValueError(f'{what}: range potřebuje min i max')
+        lo, hi = _num(spec['min'], what), _num(spec['max'], what)
+        if lo > hi:
+            raise ValueError(f'{what}: min > max')
+
+        def problem(path, v):
+            if as_int and v != int(v):
+                return f'{path}: hodnota {v} není celé číslo'
+            if not lo <= v <= hi:
+                return f'{path}: hodnota {v} mimo {lo}–{hi}'
+            return None
+    elif name == 'enum':
+        vals = frozenset(_int(x, what) for x in spec['values'])
+
+        def problem(path, v):
+            if not (v == int(v) and int(v) in vals):
+                return f'{path}: hodnota {v} není povolená'
+            return None
+    else:
+        raise ValueError(f'{what}: neznámá kontrola cesty {name!r}')
+    return problem
+
+
+def _compile_paths(prof: dict, pid) -> list:
+    paths, seen = [], set()
+    for i, e in enumerate(prof['write']):
+        what = f'{pid} write[{i}]'
+        if not isinstance(e, dict):
+            raise ValueError(f'{what}: položka není objekt')
+        if 'path' not in e or 'addr' in e:
+            raise ValueError(f'{what}: profil mqtt má jen položky s cestou (path)')
+        if e.get('enabled', True) is False:
+            continue
+        if e['path'] in seen:
+            raise ValueError(f'{what}: cesta {e["path"]} je v profilu dvakrát')
+        seen.add(e['path'])
+        persist = e.get('persist', False)
+        if not isinstance(persist, bool):
+            raise ValueError(f'{what}: persist musí být true/false')
+        paths.append((_path_re(e['path'], what), _path_check(e, what), persist))
+    return paths
+
+
 def compile_profile(prof: dict) -> dict:
     """Profil → {'regs': {adresa: kontrola}, 'blocks': {(adresa, délka): [(off, šířka, kontrola)]}, 'never',
-    'maxBlock', 'fc', 'limits', 'id'}. Neplatný profil → ValueError."""
+    'maxBlock', 'fc', 'limits', 'id', 'transport', 'paths': [(vzor, kontrola, persist)], 'maxPaths'}. Neplatný
+    profil → ValueError."""
     if not isinstance(prof, dict) or not isinstance(prof.get('write'), list):
         raise ValueError('profil bez seznamu write')
     pid = prof.get('id')
+    transport = prof.get('transport', 'modbus')
+    limits = dict(prof.get('limits') or {})
+    if transport == 'mqtt':
+        if 'maxPaths' not in limits:
+            raise ValueError(f'{pid}: profil mqtt potřebuje limits.maxPaths')
+        max_paths = _int(limits['maxPaths'], f'{pid} maxPaths')
+        if max_paths < 1:
+            raise ValueError(f'{pid}: maxPaths < 1')
+        return {'id': pid, 'transport': transport, 'regs': {}, 'blocks': {}, 'never': frozenset(), 'maxBlock': 0,
+                'fc': (), 'limits': limits, 'paths': _compile_paths(prof, pid), 'maxPaths': max_paths}
+    if transport != 'modbus':
+        raise ValueError(f'{pid}: neznámý přenos {transport!r}')
     regs, blocks = {}, {}
     for i, e in enumerate(prof['write']):
         what = f'{pid} write[{i}]'
         if not isinstance(e, dict):
             raise ValueError(f'{what}: položka není objekt')
+        if 'path' in e:
+            raise ValueError(f'{what}: cesta (path) patří jen do profilu mqtt')
         if e.get('enabled', True) is False:
             continue
         addr, count = _int(e['addr'], what), _int(e.get('count', 1), what)
@@ -148,8 +251,9 @@ def compile_profile(prof: dict) -> dict:
         blocks[(addr, count)] = sorted(fields, key=lambda x: x[0])
     never = frozenset(_int(n['addr'], f'{pid} never') for n in prof.get('never') or [])
     max_block = min(MAX_BLOCK, _int(prof.get('maxBlock', MAX_BLOCK), f'{pid} maxBlock'))
-    return {'id': pid, 'regs': regs, 'blocks': blocks, 'never': never, 'maxBlock': max_block,
-            'fc': tuple(prof.get('fc') or (16,)), 'limits': dict(prof.get('limits') or {})}
+    return {'id': pid, 'transport': transport, 'regs': regs, 'blocks': blocks, 'never': never,
+            'maxBlock': max_block, 'fc': tuple(prof.get('fc') or (16,)), 'limits': limits, 'paths': [],
+            'maxPaths': 0}
 
 
 def write_problem(comp: dict, addr, values) -> str | None:
@@ -169,3 +273,45 @@ def write_problem(comp: dict, addr, values) -> str | None:
         if not (ok(values[off]) if width == 1 else ok(values[off], values[off + 1])):
             return f'registr {addr + off}: hodnota {values[off:off + width]} mimo meze'
     return None
+
+
+def _path_entry(comp: dict, path):
+    if isinstance(path, str):
+        for rx, problem, persist in comp['paths']:
+            if rx.fullmatch(path):
+                return problem, persist
+    return None
+
+
+def path_problem(comp: dict, path, value) -> str | None:
+    """None = cestu MQTT smí klient zapsat touto hodnotou; jinak důvod."""
+    ent = _path_entry(comp, path)
+    if ent is None:
+        return f'cesta {path} mimo profil'
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return f'{path}: hodnota {value!r} není číslo'
+    return ent[0](path, value)
+
+
+def batch_problem(comp: dict, values) -> str | None:
+    """Dávka zápisu MQTT [[cesta, hodnota], …] (pořadí závazné) → None = celá smí; jinak první důvod. Žádná cesta
+    dvakrát, nejvýš `maxPaths` cest."""
+    if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= comp['maxPaths']:
+        return 'prázdná nebo příliš dlouhá dávka'
+    seen = set()
+    for item in values:
+        if not isinstance(item, (list, tuple)) or len(item) != 2 or not isinstance(item[0], str):
+            return 'neplatná položka dávky'
+        if item[0] in seen:
+            return f'cesta {item[0]} je v dávce dvakrát'
+        seen.add(item[0])
+        bad = path_problem(comp, item[0], item[1])
+        if bad:
+            return bad
+    return None
+
+
+def persistent(comp: dict, path) -> bool:
+    """Cesta je trvalé nastavení (flash) → počítá se do `limits.persistPerDay`."""
+    ent = _path_entry(comp, path)
+    return bool(ent and ent[1])
