@@ -331,7 +331,8 @@ class EdgeRunner:
         self._persist_writes: list = []      # časy zápisů trvalých nastavení (limits.persistPerDay)
         self._last_write = 0.0
         self._fast_until = 0.0
-        self.profile_id = PROFILE_ID         # profil zápisu, který určil server (`profile`); bez něj Deye
+        self.profile_id = PROFILE_ID         # profil zápisu, který určil server (`profile`); bez něj Deye, null = None
+                                             # (jen čtení — všechny zápisy odmítnuty)
         self._verified: dict = {}            # profil → identita zařízení sedí (True / False)
         # offline pojistka (stav se ukládá přes on_persist — HA Store, přežije restart)
         self.fallback: dict | None = None    # {id, deadline (čas tohoto klienta), writes}
@@ -362,6 +363,8 @@ class EdgeRunner:
         pid = st.get('profile')
         if isinstance(pid, str) and _wp.ID_RE.match(pid):
             self.profile_id = pid
+        elif 'profile' in st and pid is None:
+            self.profile_id = None               # uložené „jen čtení“ od serveru (stav 0.3.0 klíč nemá → Deye)
         # Pojistky příkazů: profil se ověří až při provedení (identita zařízení se po restartu teprve čte).
         for x in st.get('leases') if isinstance(st.get('leases'), list) else []:
             lease = self._clean_lease(x, check=False)
@@ -607,6 +610,8 @@ class EdgeRunner:
     def _comp(self, typ) -> tuple:
         """(zkompilovaný profil pro přenos, důvod když není)."""
         pid = self.profile_id
+        if pid is None:
+            return None, 'zařízení jen ke čtení (server: profile null)'
         comp = PROFILES.get(pid)
         if comp is None:
             return None, f'profil {pid} v klientu není'
@@ -793,7 +798,10 @@ class EdgeRunner:
         if code == 200:
             self._fb_tries, self._fb_retry_at = 0, 0.0   # spojení je zpět — případný příští výpadek zkouší znovu 3×
             pid = res.get('profile')
-            if isinstance(pid, str) and pid != self.profile_id and _wp.ID_RE.match(pid):
+            if 'profile' in res and pid is None and self.profile_id is not None:
+                self.profile_id = None           # server: zařízení jen ke čtení (baterie JK, Solax mimo G4) → žádné zápisy
+                self._persist()
+            elif isinstance(pid, str) and pid != self.profile_id and _wp.ID_RE.match(pid):
                 self.profile_id = pid
                 self._persist()
             await self._ensure_profile()

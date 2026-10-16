@@ -59,7 +59,8 @@ U střídačů Deye se nic nemění (stejné registry, limity, zpětné čtení 
 serveru, co umí (přenosy, vestavěné profily zápisu v `custom_components/wattery/profiles/`), a umí:
 
 - **profil zápisu podle zařízení** — vestavěný profil platí jen tehdy, když identita zařízení podle profilu sedí
-  na spárované (sériové číslo), jinak integrace zápisy odmítne;
+  na spárované (sériové číslo), jinak integrace zápisy odmítne; zařízení, které wattery označí jako jen ke čtení
+  (bez profilu zápisu), integrace jen čte;
 - **pojistky příkazů s obnovou** — příkaz, který střídač drží jen chvíli (např. dálkové řízení), integrace
   obnovuje, dokud ho wattery prodlužuje; bez spojení se serverem ho po vypršení jednou ukončí a po obnovení
   spojení to nahlásí;
@@ -89,8 +90,8 @@ as other commands (switch on, whitelist, read-back), and reports it once the con
 restarts; sensor attributes `fallback_until` and `fallback_applied`.
 
 **0.4.0:** no change for Deye. The integration now tells the server what it supports (`caps`: transports, built-in
-write profiles in `profiles/`), applies a write profile only when the device identity matches the paired serial,
-keeps short-lived commands alive while wattery extends them (and ends them once if the server is unreachable), and
+write profiles in `profiles/`), applies a write profile only when the device identity matches the paired serial
+(a device the server marks read-only gets no writes at all), keeps short-lived commands alive while wattery extends them (and ends them once if the server is unreachable), and
 reads back what the server specifies. Sensor attributes `profile` and `leases`.
 
 ## Vývoj

@@ -585,7 +585,7 @@ def _mk(sn='SN1', plan=(), transports=None, state=None, regs=None):
                'commands': s['cmds'].pop(0) if s['cmds'] else [], 'accepted': len(body['reads'])}
         if s['leases'] is not None:
             res['leases'] = s['leases']() if callable(s['leases']) else s['leases']
-        if s['profile']:
+        if s['profile'] or s.get('nullProfile'):
             res['profile'] = s['profile']
         if body.get('leaseReport') and s['ack']:
             res['leaseAck'] = body['leaseReport']['id']
@@ -761,6 +761,27 @@ async def proto2():
     finally:
         edge.PROFILES.pop('test-mb@1', None)
         edge.PROFILE_IDENTITY.pop('test-mb@1', None)
+
+    # ── profile null = jen čtení (server: baterie, střídač bez profilu zápisu) ──
+    r7, e7 = _mk(regs={143: 1})
+    r7.control_enabled = True
+    S7 = e7['srv']
+    S7.update(nullProfile=True, profile=None,
+              leases=lambda: [cmd_lease(e7['clock'].t + 180, lid='N1')])
+    res = await _step(r7, e7, cmds=[cmd('c-n1'), cmd('c-n2', fc=3, addr=143, count=1)])
+    check('profile null → zápis odmítnut, čtení projde, pojistka příkazu odmítnuta, uloženo',
+          r7.profile_id is None and 'jen ke čtení' in res[0]['err'] and res[1]['ok'] and not e7['writes']
+          and r7.leases == {} and e7['saved'][-1]['profile'] is None, (res, r7.leases))
+    r8, _e8 = _mk(state=e7['saved'][-1])
+    r9, _e9 = _mk(state={'fallback': None})
+    check('po restartu HA zůstane jen čtení; stav bez klíče profile (0.3.0) → Deye',
+          r8.profile_id is None and r9.profile_id == edge.PROFILE_ID, (r8.profile_id, r9.profile_id))
+    S7.update(nullProfile=False, leases=None)
+    res = await _step(r7, e7, cmds=[cmd('c-n3', fc=3, addr=143, count=1)])
+    check('server bez klíče profile (v1) „jen čtení“ nezruší', r7.profile_id is None and res[0]['ok'], res)
+    S7['profile'] = edge.PROFILE_ID
+    res = await _step(r7, e7, cmds=[cmd('c-n4')])
+    check('server profil zase určí → zápis projde', r7.profile_id == edge.PROFILE_ID and res[0]['ok'], res)
 
     # ── přenos mqtt (Victron GX, zápis až A5 — tady falešný přenos) ──
     gx = FakeGx()
