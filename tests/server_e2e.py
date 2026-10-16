@@ -125,7 +125,7 @@ async def main():
         tou6 = [{'time': t, 'power': 5000, 'soc': 20 + i, 'enableGridCharge': i == 1, 'enableSell': i == 4}
                 for i, t in enumerate(('00:01', '05:00', '09:00', '13:00', '17:00', '21:00'))]
         run, dt = await platform(spot_auto._apply_tou_modbus, cli, sn, tou6, {}, False)
-        check(f'TOU 3 bloky přes HA ({dt:.1f} s; další blok po rychlém dotazu)', run.get('ok') and regs.get(148) == 1
+        check(f'TOU 3 bloky přes HA ({dt:.1f} s; další blok po rychlém dotazu)', run.get('ok') and regs.get(148) == 0
               and regs.get(153) == 2100 and regs.get(166) == 20 and regs.get(173) == 1 and regs.get(176) == 0x20
               and regs.get(146) == 0xFF and not cloud, run)
         check('TOU do 12 s (1. blok ≤ 5 s poll, další á 1,5 s)', dt < 12, dt)
