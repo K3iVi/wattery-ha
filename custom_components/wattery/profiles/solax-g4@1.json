@@ -1,0 +1,53 @@
+{
+  "id": "solax-g4@1",
+  "brand": "solax",
+  "status": "draft",
+  "note": "Návrh okna B (16. 10. 2026) podle todo-edge-multibrand §2.5; formát a místo (wattery-ha profiles/) určí okno A krokem A3. Solax Gen4 má ODDĚLENOU mapu zápisu a čtení: zapsaný registr se nečte na téže adrese → u každého bloku je readBack (kde zápis ověřit).",
+  "models": {"deviceModel": [14], "snPrefix": ["H34"], "name": "X3-Hybrid-G4"},
+  "transport": "modbus",
+  "unit": 1,
+  "serial": {"baud": 19200, "format": "8N1"},
+  "fc": [16],
+  "maxBlock": 15,
+  "identity": {"fc": 3, "addr": 0, "count": 7, "decode": "ascii", "prefix": ["H34"]},
+  "limits": {"perMin": 6, "perHour": 120, "gapS": 1},
+  "write": [
+    {"name": "vpp.exit", "addr": 124, "count": 13, "fields": [{"off": 0, "count": 13, "check": "zero"}],
+     "persist": false, "enabled": true,
+     "readBack": [{"fc": 4, "addr": 256, "count": 1}, {"fc": 4, "addr": 9, "count": 1}]},
+    {"name": "vpp.mode47", "addr": 124, "count": 15, "persist": false, "enabled": true,
+     "fields": [
+       {"off": 0, "check": "enum", "values": [4, 7]},
+       {"off": 1, "check": "enum", "values": [1, 2]},
+       {"off": 2, "count": 10, "check": "zero"},
+       {"off": 12, "check": "range", "min": 30, "max": 600},
+       {"off": 13, "check": "s32", "words": "lo-hi", "min": -30000, "max": 30000}],
+     "readBack": [{"fc": 4, "addr": 256, "count": 1}, {"fc": 4, "addr": 9, "count": 1}]},
+    {"name": "vpp.mode89", "addr": 160, "count": 8, "persist": false, "enabled": false,
+     "note": "Rozložení 0xA6/0xA7 se mezi KB Solaxu (doba|cílový SOC, timeout) a zpětným čtením 0x1A6/0x1A7 (timeout, NextMotion) liší → zapnout až po zkoušce na stole (simulátor umí obě varianty, verify je rozliší).",
+     "fields": [
+       {"off": 0, "check": "enum", "values": [8, 9]},
+       {"off": 1, "check": "enum", "values": [1, 2]},
+       {"off": 2, "check": "u32", "words": "lo-hi", "min": 0, "max": 30000},
+       {"off": 4, "check": "s32", "words": "lo-hi", "min": -30000, "max": 30000},
+       {"off": 6, "check": "range", "min": 0, "max": 3600},
+       {"off": 7, "check": "range", "min": 0, "max": 3600}],
+     "readBack": [{"fc": 4, "addr": 256, "count": 1}, {"fc": 4, "addr": 9, "count": 1}, {"fc": 3, "addr": 416, "count": 8}]},
+    {"name": "set.workMode", "addr": 31, "count": 1, "persist": true, "perDay": 4, "enabled": false,
+     "note": "EEPROM (~1 mil. zápisů); 0 Self Use, 1 Feed-in Priority, 2 Back Up, 3 Manual. Zapnout až po schválení provozovatelem.",
+     "fields": [{"off": 0, "check": "enum", "values": [0, 1, 2, 3]}],
+     "readBack": [{"fc": 3, "addr": 139, "count": 1}]},
+    {"name": "set.minSoc", "addr": 97, "count": 1, "persist": true, "perDay": 4, "enabled": false,
+     "note": "EEPROM; Self Use min SOC (%). Zpětné čtení = vyšší bajt holding 0x93.",
+     "fields": [{"off": 0, "check": "range", "min": 10, "max": 100}],
+     "readBack": [{"fc": 3, "addr": 147, "count": 1, "byte": "hi"}]},
+    {"name": "set.exportLimit", "addr": 66, "count": 1, "persist": true, "perDay": 8, "enabled": true,
+     "note": "EEPROM; uživatelský limit přetoku po 10 W (X3 G4, solax_modbus scale 10; strop H34x15 = 16,5 kW). Stejná funkce jako cloud set_export_control; denní limit = export_ctl.MAX_WRITES_PER_DAY.",
+     "fields": [{"off": 0, "check": "range", "min": 0, "max": 1650}],
+     "readBack": [{"fc": 3, "addr": 182, "count": 1}]}
+  ],
+  "never": [
+    {"addr": 0, "why": "heslo / odemčení (FC06 2014) — server ho nikdy neposílá"},
+    {"addr": 143, "why": "funkce COM portu 0x8F (EEPROM) — nastaví montér v menu střídače, z wattery nikdy"}
+  ]
+}
