@@ -178,18 +178,22 @@ async def chain():
     try:
         c = gx.GxMqtt('127.0.0.1', b.port, tls=False, password='tajne')
         plan = ev.read_plan(caps={'transports': ['mqtt']})
-        await c.set_filters([f for it in plan for f in it['paths']])
+        await c.set_filters(gx.GxMqtt.plan_filters(plan))
         await c.start()
         await settle(c, 0.5)
         values = {}
         for it in plan:
-            values.update(c.read_item(it)['values'])
+            r = c.read_item(it)
+            values.update({it.get('base', '') + k: v for k, v in r['values'].items()})   # jako hub
         loc = {d['key']: d['value'] for d in ev.decode({'values': values, 'at': 1})['dataList']}
         ref = {d['key']: d['value'] for d in ev.decode({'values': sim.values, 'at': 1})['dataList']}
         check(f'řetězec plán → přenos → adaptér: stejný dataList jako strom GX ({len(ref)} klíčů)',
               loc == ref and len(ref) >= 20, {k: (ref.get(k), loc.get(k)) for k in set(ref) | set(loc)
                                               if ref.get(k) != loc.get(k)})
         check('identita z přenosu = portal stromu', ev.identity(values) == sim.portal == c.portal)
+        d = c.read_item(next(it for it in plan if it.get('base')))
+        check('položka s base: cesty bez prefixu, 384 hodnot rozvrhu DESS',
+              len(d['values']) == 384 and all(k.startswith('Schedule/') for k in d['values']))
         await c.close()
     finally:
         await b.stop()

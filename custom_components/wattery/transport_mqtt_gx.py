@@ -196,10 +196,20 @@ class GxMqtt:
         return {'values': vals, 'ts': {p: self.ts.get(p) for p in vals}}
 
     def read_item(self, item: dict) -> dict:
-        """Položka plánu `{type: 'mqtt', name, paths, everyS}` → čtení pro sync (§2.4 v todo-edge-multibrand)."""
-        snap = self.snapshot(item.get('paths') or [])
-        return {'type': 'mqtt', 'name': item.get('name'), 'dev': self.portal, 'values': snap['values'],
-                'tsBy': snap['ts'], 'ts': int(self._clock())}
+        """Položka plánu `{type: 'mqtt', name, paths, base?, everyS}` → čtení pro sync (§2.4 v todo-edge-multibrand).
+        S `base` (společný prefix) jsou filtry i posílané cesty bez něj — hub ho doplní."""
+        base = str(item.get('base') or '')
+        snap = self.snapshot([base + f for f in item.get('paths') or []])
+        cut = len(base)
+        return {'type': 'mqtt', 'name': item.get('name'), 'dev': self.portal,
+                'values': {p[cut:]: v for p, v in snap['values'].items()},
+                'tsBy': {p[cut:]: t for p, t in snap['ts'].items()}, 'ts': int(self._clock())}
+
+    @staticmethod
+    def plan_filters(plan) -> list:
+        """Všechny filtry odběru z plánu čtení (položky mqtt, s base)."""
+        return [str(it.get('base') or '') + f for it in plan or [] if it.get('type') == 'mqtt'
+                for f in it.get('paths') or []]
 
     # ── smyčka ──
     async def run(self):

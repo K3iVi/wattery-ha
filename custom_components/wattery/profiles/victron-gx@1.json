@@ -1,0 +1,25 @@
+{
+  "id": "victron-gx@1",
+  "title": "Victron GX (Cerbo, Venus OS 3.x) — lokální MQTT",
+  "brand": "victron",
+  "transport": "mqtt",
+  "note": "Vše, co platforma wattery do Victronu zapisuje (victron/mqtt.py): rozvrh Dynamic ESS (Mode jen 0/4, nikdy 1 = VRM; kapacita; sloty 0–47), ESS Minimum SOC 5–80 % a nabíječka EV. Cesty jsou relativní k W/<portal>/. Shodu s allow-listy serveru hlídá deye-monitor deye/edge_victron_selftest.py. Do Victronu se zapisuje jen s výslovným souhlasem pro konkrétní instalaci.",
+  "identity": {"path": "system/0/Serial", "decode": "portal"},
+  "limits": {"perMin": 6, "perHour": 60, "gapS": 1, "maxPaths": 385, "persistPerDay": 12},
+  "write": [
+    {"path": "settings/0/Settings/DynamicEss/Mode", "check": "enum", "values": [0, 4], "persist": true, "note": "Dynamic ESS: 0 vypnuto, 4 rozvrh wattery"},
+    {"path": "settings/0/Settings/DynamicEss/BatteryCapacity", "check": "range", "min": 1.0, "max": 300.0, "persist": true, "note": "kapacita baterie pro DESS (kWh)"},
+    {"path": "settings/0/Settings/DynamicEss/Schedule/{0..47}/Start", "check": "range", "min": 0, "max": 4102444800, "note": "začátek slotu (unix)"},
+    {"path": "settings/0/Settings/DynamicEss/Schedule/{0..47}/Duration", "check": "range", "min": 0, "max": 86400, "note": "délka slotu (s)"},
+    {"path": "settings/0/Settings/DynamicEss/Schedule/{0..47}/TargetSoc", "check": "range", "min": 0, "max": 100, "note": "cílový SOC (%)"},
+    {"path": "settings/0/Settings/DynamicEss/Schedule/{0..47}/Soc", "check": "range", "min": 0, "max": 100, "note": "cílový SOC (%)"},
+    {"path": "settings/0/Settings/DynamicEss/Schedule/{0..47}/Strategy", "check": "range", "min": 0, "max": 3, "note": "strategie slotu"},
+    {"path": "settings/0/Settings/DynamicEss/Schedule/{0..47}/Restrictions", "check": "range", "min": 0, "max": 3, "note": "omezení toků"},
+    {"path": "settings/0/Settings/DynamicEss/Schedule/{0..47}/AllowGridFeedIn", "check": "range", "min": 0, "max": 1, "note": "prodej do sítě ve slotu"},
+    {"path": "settings/0/Settings/DynamicEss/Schedule/{0..47}/Flags", "check": "range", "min": 0, "max": 3, "note": "příznaky slotu"},
+    {"path": "settings/0/Settings/CGwacs/BatteryLife/MinimumSocLimit", "check": "range", "min": 5, "max": 80, "int": true, "persist": true, "note": "ESS Minimum SOC = rezerva wattery − 1 (%)"},
+    {"path": "evcharger/{n}/StartStop", "check": "enum", "values": [0, 1], "note": "nabíječka EV: stop / start"},
+    {"path": "evcharger/{n}/Mode", "check": "enum", "values": [0, 1, 2], "note": "nabíječka EV: ručně / auto / plán"},
+    {"path": "evcharger/{n}/SetCurrent", "check": "range", "min": 6.0, "max": 32.0, "note": "nabíjecí proud (A); strop MaxCurrent nabíječky hlídá server"}
+  ]
+}
