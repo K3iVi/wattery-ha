@@ -154,6 +154,38 @@ async def main():
         runner.set_control(True)
         await until(lambda: edge_cmd.route(sn) is not None, 15)
 
+        # Offline pojistka: ozbrojené obchodování, zkouška výpadku z CLI (krátká platnost, pak server 503).
+        params = {'gridKw': 10, 'inverterKw': 12, 'reservePct': 15, 'batteryKwh': 10}
+        now = int(time.time())
+        store.save_spot_auto_config(sid, uid, sn, True, 'arbitrage', params, now, auto_apply='apply')
+        store.set_spot_auto_applied(sid, 'sigE2E', now - 600, {'ok': True, 'dryRun': False, 'masterSn': sn,
+                                                               'touBlocks': {}, 'tou6': [{'time': '00:01'}]})
+        ok = await until(lambda: runner.fallback is not None, 15)
+        exp = [w['values'] for w in srv.sync(srv.client_by_token(token), {'reads': []})[1]['fallback']['writes']]
+        check('ozbrojeno → klient má pojistku (neutrál ze serveru prošel jeho profilem)', ok
+              and [w['values'] for w in runner.fallback['writes']] == exp, runner.fallback)
+        n = len(writes)
+        edge_cmd.set_fallback_test(client_id, hold_s=4, outage_in_s=7, outage_s=20)
+        t0 = time.time()
+        ok = await until(lambda: runner.fallback_applied_at is not None, 30)
+        check(f'výpadek serveru (503) po platnosti → klient zapsal neutrál sám ({time.time() - t0:.0f} s)',
+              ok and [a for a, _ in writes[n:]] == [0x94, 0xA6, 0x92] and regs[166] == 15 and regs[146] == 0xFF
+              and runner.status == cedge.ERROR, (writes[n:], runner.status, runner.last_error))
+        ok = await until(lambda: runner._fb_report is None and runner.status == cedge.ONLINE, 30)
+        with store._conn() as c:
+            aud = [dict(x) for x in c.execute("SELECT addr, ok, status FROM edge_commands WHERE client_id=? AND "
+                                              "source='fallback' ORDER BY id", (client_id,))]
+        last = (store.get_spot_auto_config(sid) or {}).get('lastApply') or {}
+        check('spojení zpět → hlášení přijato: audit 3× fallback OK, plán se přepíše (last_applied_at 0, neutrál)',
+              ok and [(a['addr'], a['ok']) for a in aud] == [(0x94, 1), (0xA6, 1), (0x92, 1)]
+              and last.get('edgeFallback') and (store.get_spot_auto_config(sid) or {}).get('lastAppliedAt') == 0,
+              (aud, last.get('edgeFallback'), (store.get_spot_auto_config(sid) or {}).get('lastAppliedAt')))
+        n = len(writes)
+        await asyncio.sleep(6)
+        check('po obnovení nová pojistka a už žádný zápis navíc', len(writes) == n and runner.fallback
+              and runner.fallback['deadline'] > runner.fallback_applied_at, (writes[n:], runner.fallback))
+        edge_cmd.set_fallback_test(client_id)
+
         task.cancel()
         edge_cmd.DELIVER_WAIT_S = 3
         cloud.clear()

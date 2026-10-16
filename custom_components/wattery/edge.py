@@ -14,6 +14,12 @@ výchozí vypnuto), jen do registrů z DEYE_PROFILE (stejný profil má server �
 test), nejvýš RATE_PER_MIN / RATE_PER_H zápisů s odstupem WRITE_GAP_S a hned po zápisu zpětné čtení. Výsledek
 {id, ok, err | values | readBack, rbErr, dur} jde serveru hned dalším sync. Přepínač klient hlásí v každém sync
 (`client.ctl`) — vypnutý = server řídí přes Deye cloud jako dřív.
+
+Offline pojistka (od 0.3.0): klientovi s řízením posílá server v každé odpovědi `fallback` =
+  {id, validUntil, writes: [{fc: 16, addr, values}]} — neutrální rozvrh (bez prodeje, baterie na rezervě) a do kdy
+platí plán, který je ve střídači (TOU se opakuje každý den). Klient ho uloží (přežije restart HA). Když se po
+validUntil k serveru nedostane (síť, výpadek serveru — ne odmítnutí 4xx), zapíše neutrál JEDNOU stejnými pojistkami
+jako příkazy (přepínač, profil, limity, zpětné čtení) a po obnovení spojení ho nahlásí v `fallbackReport`.
 """
 from __future__ import annotations
 
@@ -40,6 +46,11 @@ MAX_RESULTS = 16              # výsledků v jednom sync (stejně jako server)
 KEEP_RESULTS = 32             # neodeslané výsledky (server nedostupný) — starší by server stejně zahodil
 SEEN_IDS = 64                 # pamatovat si posledních 64 provedených příkazů (žádný se neprovede dvakrát)
 FLUSH_ROUNDS = 3              # výsledky hned dalším sync; odpověď může nést další příkaz
+# Offline pojistka
+FALLBACK_MAX_WRITES = 6
+FALLBACK_TTL_S = 120          # zápisy pojistky jdou po sobě s odstupem WRITE_GAP_S — žádný z nich „neprošlý“
+FALLBACK_TRIES, FALLBACK_RETRY_S = 3, 300   # ha-solarman neodpověděl → zkusit znovu za 5 min, nejvýš 3×
+FALLBACK_SAVE_S = 300         # platnost se posouvá každým sync; ukládat ji nejvýš jednou za 5 min
 
 # Stav pro senzor v HA.
 STARTING, ONLINE, ERROR, REVOKED = 'starting', 'online', 'error', 'revoked'
@@ -146,16 +157,37 @@ def _u16_list(v, n) -> bool:
             and all(isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 0xFFFF for x in v))
 
 
+def clean_fallback(fb) -> dict | None:
+    """Offline pojistka ze serveru / z uloženého stavu → {id, writes} nebo None. Projde jen celá: každý zápis FC16
+    v profilu (jinak by se při výpadku zapsala jen část neutrálu)."""
+    if not isinstance(fb, dict) or not isinstance(fb.get('id'), str) or not 1 <= len(fb['id']) <= 40:
+        return None
+    writes = fb.get('writes')
+    if not isinstance(writes, list) or not 1 <= len(writes) <= FALLBACK_MAX_WRITES:
+        return None
+    out = []
+    for w in writes:
+        if not isinstance(w, dict) or w.get('fc', 16) != 16:
+            return None
+        addr, values = w.get('addr'), w.get('values')
+        if not isinstance(addr, int) or isinstance(addr, bool) or write_problem(addr, values):
+            return None
+        out.append({'addr': addr, 'values': list(values)})
+    return {'id': fb['id'], 'writes': out}
+
+
 class EdgeRunner:
     """Smyčka klienta: přečte bloky, které jsou na řadě, pošle je serveru a provede jeho příkazy."""
 
     def __init__(self, *, read_block: ReadBlock, post: Post, token: str, read_plan, version: str,
                  backend: str, next_poll_s=10, on_status: Callable[['EdgeRunner'], None] | None = None,
                  clock: Callable[[], float] = time.time, write_block: WriteBlock | None = None,
-                 sn: str | None = None, sleep: Callable[[float], Awaitable] = asyncio.sleep):
+                 sn: str | None = None, sleep: Callable[[float], Awaitable] = asyncio.sleep,
+                 state: dict | None = None, on_persist: Callable[[dict], None] | None = None):
         self._read_block, self._post, self._token = read_block, post, token
         self._version, self._backend, self._on_status, self._clock = version, backend, on_status, clock
         self._write_block, self._sn, self._sleep = write_block, (str(sn) if sn else None), sleep
+        self._on_persist = on_persist
         self.plan = clean_plan(read_plan)
         self.next_poll_s = self._clamp_poll(next_poll_s)
         self._last_read: dict = {}           # (fc, addr, count) → čas posledního (pokusu o) čtení
@@ -176,6 +208,91 @@ class EdgeRunner:
         self._writes: list = []              # časy zápisů (limit za minutu / hodinu)
         self._last_write = 0.0
         self._fast_until = 0.0
+        # offline pojistka (stav se ukládá přes on_persist — HA Store, přežije restart)
+        self.fallback: dict | None = None    # {id, deadline (čas tohoto klienta), writes}
+        self.fallback_applied_at: float | None = None   # kdy naposled zapsána; pojistka s platností do té doby
+                                                         # už proběhla (jednou za výpadek, i přes restart)
+        self._fb_report: dict | None = None     # hlášení serveru po obnovení spojení
+        self._fb_tries, self._fb_retry_at, self._fb_saved = 0, 0.0, 0.0
+        self._sync_failed = False            # poslední sync nedošel (síť / 5xx) — jen tehdy pojistka
+        self._load_state(state or {})
+
+    # ── offline pojistka: stav ───────────────────────────────────────────────
+    def _load_state(self, st: dict) -> None:
+        fb = clean_fallback(st.get('fallback'))
+        try:
+            if fb:
+                fb['deadline'] = float(st['fallback']['deadline'])
+                self.fallback = fb
+            self.fallback_applied_at = float(st['appliedAt']) if st.get('appliedAt') is not None else None
+        except (KeyError, TypeError, ValueError):
+            self.fallback = None
+        rep = st.get('report')
+        self._fb_report = rep if isinstance(rep, dict) and isinstance(rep.get('id'), str) else None
+
+    def state(self) -> dict:
+        return {'fallback': self.fallback, 'report': self._fb_report, 'appliedAt': self.fallback_applied_at}
+
+    def _persist(self) -> None:
+        if self.fallback:
+            self._fb_saved = self.fallback['deadline']
+        if self._on_persist:
+            try:
+                self._on_persist(self.state())
+            except Exception:  # noqa: BLE001 — uložení nesmí shodit smyčku
+                _LOGGER.exception('wattery: uložení stavu offline pojistky selhalo')
+
+    def _accept_fallback(self, res: dict, now: float) -> None:
+        """Pojistka z odpovědi sync. validUntil je čas serveru → převést na hodiny klienta (serverTime)."""
+        if 'fallback' not in res:
+            return
+        fb = clean_fallback(res['fallback'])
+        if fb is None:
+            if res['fallback'] is not None:
+                _LOGGER.warning('wattery: offline pojistka ze serveru neprošla kontrolou (mimo profil) — neukládám')
+            if self.fallback is not None:
+                self.fallback = None
+                self._persist()
+            return
+        try:
+            st = res.get('serverTime')
+            offset = now - float(st) if isinstance(st, (int, float)) and not isinstance(st, bool) else 0.0
+            fb['deadline'] = float(res['fallback']['validUntil']) + offset
+        except (KeyError, TypeError, ValueError):
+            return
+        changed = self.fallback is None or self.fallback['id'] != fb['id']
+        self.fallback = fb
+        if changed or abs(fb['deadline'] - self._fb_saved) >= FALLBACK_SAVE_S:
+            self._persist()
+
+    async def _maybe_fallback(self, now: float) -> None:
+        """Bez spojení se serverem po platnosti plánu → zapsat neutrál (jednou za výpadek)."""
+        fb = self.fallback
+        if (not fb or not self._sync_failed or now < fb['deadline'] or not self.control_enabled
+                or (self.fallback_applied_at is not None and fb['deadline'] <= self.fallback_applied_at)
+                or now < self._fb_retry_at):
+            return
+        _LOGGER.warning('wattery: bez spojení se serverem po platnosti plánu — zapisuji neutrální rozvrh (pojistka)')
+        steps = []
+        for w in fb['writes']:
+            out = await self._execute({'type': 'modbus', 'sn': self._sn, 'fc': 16, 'addr': w['addr'],
+                                       'values': w['values'], 'expiresInS': FALLBACK_TTL_S}, self._clock())
+            steps.append({'addr': w['addr'], 'values': w['values'],
+                          **{k: out[k] for k in ('ok', 'err', 'readBack', 'rbErr') if k in out}})
+        self._fb_tries += 1
+        retry = any(not s['ok'] and str(s.get('err', '')).startswith(('exec', 'rate-limit')) for s in steps)
+        if retry and self._fb_tries < FALLBACK_TRIES:
+            self._fb_retry_at = now + FALLBACK_RETRY_S
+            _LOGGER.warning('wattery: pojistka se nezapsala celá (%s) — zkusím znovu za %s s',
+                            [s.get('err') for s in steps if not s['ok']], FALLBACK_RETRY_S)
+            return
+        ok = all(s['ok'] for s in steps)
+        self._fb_tries, self._fb_retry_at = 0, 0.0
+        self.fallback_applied_at = self._clock()
+        self._fb_report = {'id': fb['id'], 'at': int(self.fallback_applied_at), 'ok': ok, 'steps': steps}
+        self.last_command = 'offline pojistka: ' + ('neutrál zapsán' if ok else 'zapsáno jen částečně')
+        self._persist()
+        self._set(self.status, self.last_error)
 
     @staticmethod
     def _clamp_poll(v) -> float:
@@ -238,6 +355,7 @@ class EdgeRunner:
             if not self._pending or self.status != ONLINE:
                 break
             await self._sync(self._clock(), [])
+        await self._maybe_fallback(self._clock())
 
     async def _sync(self, now, reads) -> None:
         body = {'client': {'ver': self._version, 'backend': self._backend,
@@ -245,15 +363,27 @@ class EdgeRunner:
         sent = self._pending[:MAX_RESULTS]
         if sent:
             body['results'] = sent
+        report = self._fb_report
+        if report:
+            body['fallbackReport'] = report
         try:
             code, res = await self._post(SYNC_PATH, body, self._token)
         except Exception as e:  # noqa: BLE001 — síť: zkusit příště (čtení z tohoto kola propadnou, výsledky ne)
             self._last_sync = now
+            self._sync_failed = True
             self._set(ERROR, f'server nedostupný: {e}')
             return
         self._last_sync = now
+        self._sync_failed = code >= 500       # jen výpadek serveru se počítá jako „bez spojení“ (ne odmítnutí 4xx)
         res = res if isinstance(res, dict) else {}
+        if report and code in (200, 400):    # přijato (fallbackAck), nebo server hlášení nechce — neposílat dokola
+            if res.get('fallbackAck') != report['id']:
+                _LOGGER.info('wattery: server hlášení offline pojistky nepotvrdil (HTTP %s)', code)
+            self._fb_report = None
+            self._persist()
         if code == 200:
+            self._fb_tries, self._fb_retry_at = 0, 0.0   # spojení je zpět — případný příští výpadek zkouší znovu 3×
+            self._accept_fallback(res, now)
             del self._pending[:len(sent)]
             plan = clean_plan(res.get('readPlan'))
             if plan:

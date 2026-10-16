@@ -2,7 +2,8 @@
 
 Server (monitoring.wattery.cz) určuje, které registry a jak často číst. Se zapnutým přepínačem „Řízení z wattery“
 (výchozí vypnuto) provádí i příkazy platformy (okna TOU, proudy, max. prodej…) místo přes Deye cloud — jen registry
-z povoleného profilu a se zpětným čtením (edge.py).
+z povoleného profilu a se zpětným čtením (edge.py). Bez spojení se serverem po platnosti plánu zapíše jednou neutrální
+rozvrh (offline pojistka, stav v HA Store).
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.storage import Store
 
 from . import api
 from .const import BACKEND, CLIENT_VER, CONF_DEVICE, CONF_READ_PLAN, CONF_SN, CONF_TOKEN, DOMAIN, VERSION
@@ -21,6 +23,7 @@ from .edge import EdgeRunner, Revoked
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
+STORAGE_VERSION = 1
 
 
 @dataclass
@@ -45,10 +48,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: WatteryConfigEntry) -> b
             cb()
 
     device = entry.data[CONF_DEVICE]
+    # Offline pojistka (neutrální rozvrh + do kdy platí plán) musí přežít restart HA — výpadek může trvat déle.
+    store: Store = Store(hass, STORAGE_VERSION, f'{DOMAIN}.{entry.entry_id}')
+    state = await store.async_load() or {}
+
+    def on_persist(st: dict) -> None:
+        store.async_delay_save(lambda: st, 1)
+
     runner = EdgeRunner(read_block=api.make_reader(hass, device), write_block=api.make_writer(hass, device),
                         post=api.make_post(hass), token=entry.data[CONF_TOKEN], sn=entry.data[CONF_SN],
                         read_plan=entry.data.get(CONF_READ_PLAN) or [], version=CLIENT_VER, backend=BACKEND,
-                        on_status=on_status)
+                        on_status=on_status, state=state, on_persist=on_persist)
     rt = WatteryRuntime(runner=runner)
     entry.runtime_data = rt
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

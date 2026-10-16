@@ -38,6 +38,21 @@ přes Home Assistant místo přes Deye cloud.
 Stav ukazují atributy senzoru *Lokální spojení*: `control` (přepínač), `server_control` (řízení na straně wattery),
 `commands` a `last_command`.
 
+## Offline pojistka (od verze 0.3.0)
+
+Když wattery obchoduje přes Home Assistant, posílá s každou odpovědí i **neutrální rozvrh** (jedno okno držení
+baterie na rezervě, bez prodeje do sítě) a dobu, do kdy platí plán ve střídači (nejvýš 12 h, nejdéle do konce dnů
+s cenami). Home Assistant si ho uloží (přežije restart).
+
+- Když se Home Assistant **nespojí se serverem wattery** (síť, výpadek serveru) a platnost plánu mezitím vyprší,
+  zapíše neutrální rozvrh **jednou** — stejnou cestou a se stejnými kontrolami jako ostatní příkazy (přepínač
+  *Řízení z wattery* musí být zapnutý, jen povolené registry, zpětné čtení). Střídač tak neobchoduje podle starého
+  plánu se zastaralými cenami.
+- Když wattery zápis odmítne (např. střídač už k elektrárně nepatří), pojistka se nespustí — jen při výpadku.
+- Po obnovení spojení Home Assistant zápis nahlásí, wattery ho zaznamená a plán hned přepíše aktuálním.
+
+Atributy senzoru: `fallback_until` (do kdy platí plán) a `fallback_applied` (kdy se naposled zapsal neutrál).
+
 ---
 
 ## English
@@ -53,10 +68,17 @@ code from the wattery app.
 Deye cloud. Only whitelisted registers within limits (`DEYE_PROFILE`), every write is read back, max 15 writes/min
 and 60/h. Switch off = read-only; wattery then controls via the Deye cloud as before.
 
+**Offline fallback (0.3.0+):** while trading through Home Assistant, wattery sends a neutral schedule (hold the battery
+at reserve, no export) and how long the current plan stays valid (max 12 h). If Home Assistant cannot reach wattery
+(network or server outage, not a refusal) after that time, it writes the neutral schedule once, with the same checks
+as other commands (switch on, whitelist, read-back), and reports it once the connection is back. State survives
+restarts; sensor attributes `fallback_until` and `fallback_applied`.
+
 ## Vývoj
 
-- `python tests/test_edge.py` — testy jádra bez Home Assistantu (čtení, řízení, shoda profilu se serverem,
+- `python tests/test_edge.py` — testy jádra bez Home Assistantu (čtení, řízení, offline pojistka, shoda profilu se serverem,
   když je vedle checkout deye-monitor; volitelně E2E proti lokálnímu serveru, viz soubor).
 - `python tests/server_e2e.py` — klient proti skutečnému serveru deye-monitor v jednom procesu (dočasná DB, bez sítě).
-- `<venv s homeassistant>/python tests/ha_core_control.py` — přepínač a zápis uvnitř Home Assistant core.
+- `<venv s homeassistant>/python tests/ha_core_control.py` — přepínač, zápis a offline pojistka (HA Store) uvnitř
+  Home Assistant core.
 - `<venv>/python tests/ha_core_e2e.py <url> <kód> <sn>` — párování a čtení proti lokálnímu serveru.

@@ -54,4 +54,9 @@ class WatteryStatusSensor(SensorEntity):
             'server_control': r.server_control,
             'commands': r.commands_done,
             'last_command': r.last_command,
+            # offline pojistka: do kdy platí plán ve střídači bez spojení se serverem, kdy se naposled zapsal neutrál
+            'fallback_until': (datetime.fromtimestamp(r.fallback['deadline'], timezone.utc).isoformat()
+                               if r.fallback else None),
+            'fallback_applied': (datetime.fromtimestamp(r.fallback_applied_at, timezone.utc).isoformat()
+                                 if r.fallback_applied_at else None),
         }
