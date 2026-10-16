@@ -79,6 +79,7 @@ async def main():
 
     async def post(path, body, token=None):
         if path == cedge.PAIR_PATH:
+            srv['pair'] = body
             return 200, {'ok': True, 'token': 'TOK', 'clientId': 7, 'stationId': 1001, 'readPlan': PLAN,
                          'nextPollS': 10}
         if token != 'TOK':
@@ -100,6 +101,7 @@ async def main():
     res = await hass.config_entries.flow.async_init('wattery', context={'source': 'user'})
     ok = await hass.config_entries.flow.async_configure(res['flow_id'], {'code': 'abcd-efgh', 'device': 'dev1'})
     check('spárováno', ok['type'] == 'create_entry' and ok['data']['sn'] == SN, ok)
+    check('párování posílá caps (protokol 2)', (srv.get('pair') or {}).get('caps') == cedge.client_caps(), srv.get('pair'))
     await hass.async_block_till_done()
     entry = hass.config_entries.async_entries('wattery')[0]
     ents = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
@@ -163,6 +165,9 @@ async def main():
             return {}
     check('pojistka ze serveru přijata a uložena v HA Store', await until(lambda: runner.fallback is not None)
           and await until(lambda: (stored().get('fallback') or {}).get('id') == 'fb-1', 5), stored())
+    check('senzor: atribut profile (profil zápisu, bez profile od serveru Deye)',
+          hass.states.get(sens.entity_id).attributes.get('profile') == 'deye-lv@1'
+          and hass.states.get(sens.entity_id).attributes.get('leases') == [])
     check('senzor: atribut fallback_until', bool(hass.states.get(sens.entity_id).attributes.get('fallback_until')),
           dict(hass.states.get(sens.entity_id).attributes))
     srv['nofb'] = True                       # server pojistku dál neposílá → po reloadu musí být z HA Store

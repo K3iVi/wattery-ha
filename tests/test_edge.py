@@ -1,6 +1,7 @@
 """Testy jádra (bez Home Assistantu): python tests/test_edge.py
 
-Čtení, sync, řízení (příkazy, přepínač, profil, limity, zpětné čtení), offline pojistka a shoda profilu zápisu se serverem
+Čtení, sync, řízení (příkazy, přepínač, profil, limity, zpětné čtení), offline pojistka, protokol 2 (caps, pojistky
+příkazů s obnovou, readBack, profil od serveru, přenos mqtt) a shoda profilu zápisu se serverem
 (když je vedle repa checkout deye-monitor). Volitelně E2E proti běžícímu serveru deye-monitor s DEYE_EDGE=1 (lokálně!):
   python tests/test_edge.py --url http://127.0.0.1:3000 --code ABCD-EFGH --sn 2203084752
 """
@@ -71,7 +72,8 @@ async def unit():
     check('1. kolo: oba bloky přečteny', reads_log == [(3, 586, 3), (3, 3, 5)], reads_log)
     body = posts[-1][1]
     check('sync s tokenem, verzí a stavem přepínače řízení (výchozí vypnuto)', posts[-1][0] == edge.SYNC_PATH
-          and posts[-1][2] == 'T' and body['client'] == {'ver': 'test/1', 'backend': 'fake', 'ctl': 'off'}, posts[-1])
+          and posts[-1][2] == 'T' and body['client'] == {'ver': 'test/1', 'backend': 'fake', 'ctl': 'off',
+                                                     'caps': edge.client_caps()}, posts[-1])
     check('čtení nese sn bloku a ts', body['reads'][0].get('sn') == '123' and body['reads'][0]['ts'] == 1_000_000
           and body['reads'][0]['values'] == [586, 587, 588], body['reads'][0])
     check('stav online', r.status == edge.ONLINE, r.status)
@@ -524,6 +526,286 @@ async def fallback():
     check('uložená pojistka mimo profil (jiná verze profilu) → zahodit', r7.fallback is None, r7.state())
 
 
+def _match(flt, path):
+    f, p = flt.split('/'), path.split('/')
+    return len(f) == len(p) and all(a in ('+', b) for a, b in zip(f, p))
+
+
+class FakeGx:
+    """Přenos mqtt jako transport_mqtt_gx.GxMqtt (portal, read_item s base, set_filters) + zápis s ozvěnou (A5)."""
+    D = 'settings/0/Settings/DynamicEss/'
+
+    def __init__(self, portal='c0ffee000001', can_write=True):
+        self.portal, self.filters, self.writes = portal, [], []
+        self.values = {'system/0/Dc/Battery/Soc': 55.5, self.D + 'Mode': 0, self.D + 'Schedule/0/Soc': 20}
+        self.ts = {p: 999_000.7 for p in self.values}
+        if not can_write:
+            self.write = None
+
+    async def set_filters(self, filters):
+        self.filters = list(filters)
+
+    def read_item(self, it):
+        base = it.get('base') or ''
+        vals = {p[len(base):]: v for p, v in self.values.items()
+                if p.startswith(base) and any(_match(base + f, p) for f in it['paths'])}
+        return {'type': 'mqtt', 'name': it['name'], 'dev': self.portal, 'values': vals,
+                'tsBy': {p: self.ts[base + p] for p in vals}, 'ts': 0}
+
+    async def write(self, pairs):
+        self.writes.append([list(x) for x in pairs])
+        self.values.update({p: v for p, v in pairs})
+        return {p: self.values[p] for p, _v in pairs}
+
+
+def _mk(sn='SN1', plan=(), transports=None, state=None, regs=None):
+    """Klient proti falešnému serveru protokolu 2 (leases, profile, příkazy z fronty)."""
+    clock, regs = Clock(), ({} if regs is None else regs)
+    e = {'posts': [], 'writes': [], 'reads': [], 'saved': [], 'clock': clock, 'regs': regs,
+         'srv': {'leases': None, 'profile': None, 'cmds': [], 'down': False, 'ack': True, 'control': 'on'}}
+
+    async def read_block(fc, addr, count):
+        e['reads'].append((fc, addr, count))
+        return [regs.get(a, 0) for a in range(addr, addr + count)]
+
+    async def write_block(addr, values):
+        e['writes'].append((clock.t, addr, list(values)))
+        regs.update({addr + i: v for i, v in enumerate(values)})
+        clock.t += 0.2
+
+    async def sleep(s):
+        clock.t += s
+
+    async def post(path, body, token):
+        s = e['srv']
+        e['posts'].append(body)
+        if s['down']:
+            raise OSError('síť')
+        res = {'ok': True, 'serverTime': clock.t, 'nextPollS': 5, 'control': s['control'],
+               'commands': s['cmds'].pop(0) if s['cmds'] else [], 'accepted': len(body['reads'])}
+        if s['leases'] is not None:
+            res['leases'] = s['leases']() if callable(s['leases']) else s['leases']
+        if s['profile']:
+            res['profile'] = s['profile']
+        if body.get('leaseReport') and s['ack']:
+            res['leaseAck'] = body['leaseReport']['id']
+        if body.get('fallbackReport'):
+            res['fallbackAck'] = body['fallbackReport']['id']
+        return 200, res
+    r = edge.EdgeRunner(read_block=read_block, write_block=write_block, post=post, token='T', read_plan=list(plan),
+                        version='t', backend='f', clock=clock, sn=sn, sleep=sleep, state=state,
+                        on_persist=lambda st: e['saved'].append(json.loads(json.dumps(st))), transports=transports)
+    return r, e
+
+
+async def _step(r, e, dt=5.0, cmds=None):
+    if cmds:
+        e['srv']['cmds'].append(list(cmds))
+    e['clock'].t += dt
+    n = len(e['posts'])
+    await r.tick()
+    return [x for b in e['posts'][n:] for x in b.get('results', [])]
+
+
+async def proto2():
+    print('— protokol 2 (caps, leases, readBack, profil, mqtt)')
+    caps = edge.client_caps()
+    check('caps: Modbus, vestavěné profily, lease + readBack', caps == {
+        'proto': 2, 'transports': ['modbus'], 'profiles': sorted(edge.PROFILES), 'features': ['lease', 'readBack']}
+        and 'deye-lv@1' in caps['profiles'], caps)
+    check('caps: zapojený přenos mqtt se hlásí', edge.client_caps({'mqtt': object()})['transports'] == ['modbus', 'mqtt'])
+    plan = [{'type': 'mqtt', 'name': 'dess', 'dev': 'c0ffee000001', 'base': FakeGx.D, 'paths': ['Schedule/+/Soc', 'Mode'],
+             'everyS': 300},
+            {'type': 'mqtt', 'name': 'live', 'paths': ['system/0/Dc/Battery/Soc'], 'everyS': 30},
+            {'type': 'mqtt', 'name': 'zle', 'paths': 'system/#', 'everyS': 30},
+            {'type': 'ha_entity', 'name': 'ent', 'integration': 'solax_modbus', 'everyS': 60},
+            {'type': 'modbus', 'fc': 3, 'addr': 586, 'count': 3, 'everyS': 30}]
+    items = edge.clean_items(plan, {'mqtt': object()})
+    check('clean_items: jen položky zapojených přenosů a platné (paths seznam)', [i['name'] for i in items] == ['dess', 'live']
+          and items[0]['base'] == FakeGx.D and items[0]['dev'] == 'c0ffee000001'
+          and [b['addr'] for b in edge.clean_plan(plan)] == [586], items)
+    big = [{'type': 'mqtt', 'name': f'n{i}', 'values': {'x' * 40 + str(k): k for k in range(400)}} for i in range(3)]
+    huge = {'type': 'mqtt', 'name': 'huge', 'values': {'y' * 40 + str(k): k for k in range(2000)}}
+    ch = edge.split_reads(big + [huge])
+    ch2 = edge.split_reads([{'fc': 3, 'addr': a, 'values': [0]} for a in range(20)])
+    check('split_reads: pod 48 kB a nejvýš 16 položek v sync, položka přes strop vynechána',
+          [len(c) for c in ch] == [2, 1] and all(len(json.dumps(c)) < edge.READS_BUDGET for c in ch)
+          and [len(c) for c in ch2] == [16, 4] and edge.split_reads([]) == [], [len(c) for c in ch])
+
+    # ── pojistky (Deye profil: obnova i onExpire do registru 143) ──
+    r, e = _mk()
+    S, clock = e['srv'], e['clock']
+    r.control_enabled = True
+    station = lambda t: {'id': 'st-1', 'source': 'station', 'validUntil': t, 'onExpire': [
+        {'type': 'modbus', 'sn': 'SN1', 'fc': 16, 'addr': w['addr'], 'values': w['values']} for w in NEUTRAL]}
+
+    def cmd_lease(t, lid='L1', hard=None, **kw):
+        out = {'id': lid, 'source': 'command', 'validUntil': t,
+               'refresh': {'cmds': [{'type': 'modbus', 'sn': 'SN1', 'unit': 1, 'fc': 16, 'addr': 143,
+                                     'values': [15400]}], 'everyS': 10},
+               'onExpire': [{'type': 'modbus', 'sn': 'SN1', 'unit': 1, 'fc': 16, 'addr': 143, 'values': [15500]}]}
+        if hard is not None:
+            out['hardUntil'] = hard
+        return dict(out, **kw)
+    t0 = clock.t
+    S['leases'] = lambda: [station(clock.t + 600), cmd_lease(clock.t + 180, hard=t0 + 905)]
+    await _step(r, e)
+    check('každý sync nese caps', all(b['client'].get('caps') == edge.client_caps() for b in e['posts']), e['posts'][-1])
+    L = r.leases.get('L1') or {}
+    check('pojistka stanice → cesta fallback (jako 0.3.0), pojistka příkazu do leases',
+          r.fallback and r.fallback['id'] == 'st-1' and abs(r.fallback['deadline'] - (clock.t + 600)) < 1e-6
+          and [w['addr'] for w in r.fallback['writes']] == [0x94, 0xA6, 0x92] and list(r.leases) == ['L1'], r.state())
+    check('obnova: everyS nejméně 30 s, platnost = validUntil (hodiny klienta), uloženo',
+          L.get('refresh', {}).get('everyS') == edge.REFRESH_MIN_S and abs(L['deadline'] - (clock.t + 180)) < 1e-6
+          and e['saved'] and e['saved'][-1]['leases'][0]['id'] == 'L1', L)
+    for _ in range(6):
+        await _step(r, e)
+    ref = [w for w in e['writes'] if w[1:] == (143, [15400])]
+    check('obnova á 30 s (jeden zápis za 30 s), do limitu zápisů se nepočítá', len(ref) == 1 and r._writes == []
+          and r.refreshes == 1, (e['writes'], r._writes))
+    await _step(r, e, dt=30)
+    check('další obnova po 30 s', len([w for w in e['writes'] if w[1:] == (143, [15400])]) == 2, e['writes'])
+    r.control_enabled = False
+    n = len(e['writes'])
+    await _step(r, e, dt=31)
+    check('přepínač vypnutý → žádná obnova', len(e['writes']) == n, e['writes'][n:])
+    r.control_enabled = True
+    S['leases'] = lambda: [station(clock.t + 600)]
+    n = len(e['writes'])
+    await _step(r, e)
+    check('pojistka ze seznamu zmizela → zahodit BEZ onExpire', r.leases == {} and len(e['writes']) == n, e['writes'][n:])
+    S['leases'] = lambda: [cmd_lease(clock.t + 180, onExpire=[{'type': 'modbus', 'sn': 'SN1', 'fc': 16, 'addr': 160,
+                                                                 'values': [5200]}])]
+    await _step(r, e)
+    check('onExpire mimo profil → celá pojistka odmítnuta; bez pojistky stanice fallback None', r.leases == {}
+          and r.fallback is None, r.leases)
+    for bad in (cmd_lease(clock.t + 180, onExpire=[{'type': 'modbus', 'sn': 'JINY', 'fc': 16, 'addr': 143, 'values': [1]}]),
+                cmd_lease(clock.t + 180, refresh={'cmds': [], 'everyS': 60}), cmd_lease(clock.t + 180, validUntil='x'),
+                cmd_lease(clock.t + 180, onExpire=[{'type': 'mqtt', 'dev': 'x', 'op': 'write', 'values': [['a', 1]]}])):
+        S['leases'] = [bad]
+        await _step(r, e)
+        if r.leases:
+            break
+    check('cizí SN / prázdná obnova / validUntil text / mqtt bez profilu → odmítnuto', r.leases == {}, r.leases)
+
+    # výpadek serveru: obnova do platnosti, pak jednou onExpire, hlášení po návratu
+    S['leases'] = lambda: [cmd_lease(clock.t + 60, lid='L2')]
+    await _step(r, e)
+    deadline = r.leases['L2']['deadline']
+    S['down'] = True
+    n = len(e['writes'])
+    for _ in range(30):
+        await _step(r, e)
+    w = e['writes'][n:]
+    check('bez spojení: obnova jen do platnosti, potom JEDNOU onExpire',
+          all(t < deadline + 1 for t, a, v in w if v == [15400]) and [x for x in w if x[2] == [15500]]
+          and len([x for x in w if x[2] == [15500]]) == 1 and min(t for t, a, v in w if v == [15500]) >= deadline, w)
+    rep = r._lease_reports[0] if r._lease_reports else {}
+    check('hlášení pojistky: id, source, ok, kroky s typem, adresou, hodnotami a zpětným čtením',
+          rep.get('id') == 'L2' and rep.get('source') == 'command' and rep.get('ok') is True
+          and rep['steps'][0]['type'] == 'modbus' and rep['steps'][0]['addr'] == 143
+          and rep['steps'][0]['readBack'] == [15500] and e['saved'][-1]['leaseReports'][0]['id'] == 'L2', rep)
+    r2, e2 = _mk(state=e['saved'][-1], regs=e['regs'])
+    check('po restartu HA: pojistka i hlášení z uloženého stavu', 'L2' in r2.leases
+          and r2.leases['L2']['appliedAt'] and r2._lease_reports and r2._lease_reports[0]['id'] == 'L2', r2.state())
+    S['down'] = False
+    S['leases'] = lambda: []
+    await _step(r, e)
+    sent = [b for b in e['posts'] if b.get('leaseReport')]
+    check('spojení zpět → leaseReport odeslán, potvrzen (leaseAck), smazán; pojistka zahozena',
+          sent and sent[-1]['leaseReport']['id'] == 'L2' and r._lease_reports == [] and r.leases == {}
+          and e['saved'][-1]['leaseReports'] == [], r.state())
+
+    # ── readBack podle zadání serveru (Solax: jiná mapa čtení) ──
+    r, e = _mk(regs={143: 1, 500: 7, 501: 8})
+    r.control_enabled = True
+    res = await _step(r, e, cmds=[cmd('c-1', readBack=[{'fc': 3, 'addr': 143, 'count': 1},
+                                                       {'fc': 4, 'addr': 500, 'count': 2}])])
+    check('readBack spec: po zápisu přečte zadané bloky → [{fc, addr, count, values}]', res and res[0]['ok']
+          and res[0]['readBack'] == [{'fc': 3, 'addr': 143, 'count': 1, 'values': [15400]},
+                                     {'fc': 4, 'addr': 500, 'count': 2, 'values': [7, 8]}] and (4, 500, 2) in e['reads'], res)
+    n = len(e['writes'])
+    bad_specs = ([{'fc': 16, 'addr': 1, 'count': 1}], [{'fc': 3, 'addr': 1, 'count': 0}],
+                 [{'fc': 3, 'addr': 1, 'count': 1}] * 5, 'x')
+    res = await _step(r, e, cmds=[cmd(f'c-b{i}', readBack=s) for i, s in enumerate(bad_specs)])
+    check('readBack neplatný (FC16 / 0 registrů / 5 bloků / text) → bad-command, nic nezapsáno',
+          [x['err'] for x in res] == ['bad-command: readBack'] * 4 and len(e['writes']) == n, res)
+
+    # ── profil zápisu od serveru ──
+    S = e['srv']
+    S['profile'] = 'neznamy@1'
+    res = await _step(r, e, cmds=[cmd('c-p1'), cmd('c-p2', fc=3, addr=143, count=1)])
+    check('server určí profil, který klient nemá → zápis odmítnut, čtení projde',
+          res[0]['err'] == 'not-allowed: profil neznamy@1 v klientu není' and res[1]['ok'], res)
+    S['profile'] = 'victron-gx@1'
+    res = await _step(r, e, cmds=[cmd('c-p3')])
+    check('profil mqtt na příkaz Modbus → odmítnut', 'není pro přenos modbus' in res[0]['err'], res)
+    edge.PROFILES['test-mb@1'] = edge._wp.compile_profile({'id': 'test-mb@1', 'transport': 'modbus',
+                                                           'write': [{'addr': 143, 'min': 0, 'max': 24000}]})
+    edge.PROFILE_IDENTITY['test-mb@1'] = {'fc': 3, 'addr': 3, 'count': 5, 'decode': 'ascii'}
+    try:
+        sn_regs = {3 + i: v for i, v in enumerate([0x534E, 0x3100, 0, 0, 0])}     # 'SN1'
+        e['regs'].update(sn_regs)
+        S['profile'] = 'test-mb@1'
+        res = await _step(r, e, cmds=[cmd('c-p4'), cmd('c-p5', addr=108, values=[100])])
+        check('vlastní profil: identita podle profilu sedí na SN → zápis podle něj (108 v něm není)',
+              res[0]['ok'] and res[1]['err'].startswith('not-allowed: registr 108') and r._verified.get('test-mb@1') is True
+              and e['saved'][-1]['profile'] == 'test-mb@1', (res, r._verified))
+        r3, e3 = _mk(sn='JINYSN', regs=dict(sn_regs))
+        r3.control_enabled = True
+        e3['srv']['profile'] = 'test-mb@1'
+        res = await _step(r3, e3, cmds=[cmd('c-p6', sn='JINYSN')])
+        check('identita podle profilu nesedí (jiné SN) → zápisy odmítnuty (chybný server nepošle cizí blok)',
+              'identita zařízení neověřená' in res[0]['err'] and r3._verified == {'test-mb@1': False}
+              and not e3['writes'], res)
+    finally:
+        edge.PROFILES.pop('test-mb@1', None)
+        edge.PROFILE_IDENTITY.pop('test-mb@1', None)
+
+    # ── přenos mqtt (Victron GX, zápis až A5 — tady falešný přenos) ──
+    gx = FakeGx()
+    P = FakeGx.D
+    r, e = _mk(sn=gx.portal, plan=plan, transports={'mqtt': gx})
+    S = e['srv']
+    S['profile'] = 'victron-gx@1'
+    await _step(r, e)
+    body = e['posts'][-1]
+    rd = {x['name']: x for x in body['reads'] if x.get('type') == 'mqtt'}
+    check('mqtt: odběr filtrů z plánu (s base), čtení položek s dev, cesty bez base, tsBy celé sekundy',
+          gx.filters == [P + 'Schedule/+/Soc', P + 'Mode', 'system/0/Dc/Battery/Soc'] and set(rd) == {'dess', 'live'}
+          and rd['dess']['values'] == {'Mode': 0, 'Schedule/0/Soc': 20} and rd['dess']['dev'] == gx.portal
+          and rd['dess']['tsBy'] == {'Mode': 999000, 'Schedule/0/Soc': 999000}
+          and body['client']['caps']['transports'] == ['modbus', 'mqtt'], (gx.filters, rd))
+    check('profil victron-gx@1: identita = portal přenosu', r._verified == {'victron-gx@1': True}, r._verified)
+    mq = lambda cid, values, **kw: dict({'id': cid, 'type': 'mqtt', 'dev': gx.portal, 'op': 'write', 'values': values,
+                                         'expiresInS': 10}, **kw)
+    batch = [[P + 'Schedule/0/Soc', 50], [P + 'Mode', 4]]
+    res = await _step(r, e, cmds=[mq('m-0', batch)])
+    check('mqtt zápis s vypnutým přepínačem → local-off', res[0]['err'] == 'local-off' and not gx.writes, res)
+    r.control_enabled = True
+    res = await _step(r, e, cmds=[mq('m-1', batch), mq('m-2', [[P + 'Mode', 1]]), mq('m-3', batch, dev='deadbeef0001'),
+                                  {'id': 'm-4', 'type': 'mqtt', 'dev': gx.portal, 'op': 'read', 'paths': [P + 'Mode']},
+                                  mq('m-5', [[P + 'Schedule/0/Soc', 1]] * 2)])
+    check('mqtt zápis: dávka v pořadí → ozvěna; Mode 1 / cizí GX / cesta dvakrát → odmítnuto; čtení cest',
+          res[0]['ok'] and res[0]['echo'] == {P + 'Schedule/0/Soc': 50, P + 'Mode': 4} and gx.writes == [batch]
+          and res[1]['err'].startswith('not-allowed') and res[2]['err'] == 'foreign-sn'
+          and res[3]['ok'] and res[3]['values'] == {P + 'Mode': 4} and 'dvakrát' in res[4]['err'], res)
+    gx2 = FakeGx(can_write=False)
+    r4, e4 = _mk(sn=gx2.portal, plan=plan, transports={'mqtt': gx2})
+    r4.control_enabled = True
+    e4['srv']['profile'] = 'victron-gx@1'
+    res = await _step(r4, e4, cmds=[mq('m-6', batch)])
+    check('přenos bez zápisu (GX dnes jen čtení) → exec, nic nezapsáno', res[0]['err'] == 'exec: přenos mqtt neumí zápis', res)
+    r5, e5 = _mk(sn='SN1')
+    res = await _step(r5, e5, cmds=[mq('m-7', batch)])
+    check('klient bez přenosu mqtt → bad-command', res[0]['err'] == 'bad-command: přenos mqtt není zapojený', res)
+    gx.values.clear()
+    r6, e6 = _mk(sn=gx.portal, plan=plan, transports={'mqtt': gx})
+    await _step(r6, e6)
+    check('přenos zatím nic nemá → položka se neposílá (neprázdný stav na serveru nepřepíše)',
+          not [x for x in e6['posts'][-1]['reads'] if x.get('type') == 'mqtt'], e6['posts'][-1]['reads'])
+
+
 def profile_data():
     """Profil zápisu jako data (bez serveru — běží i v CI)."""
     p = edge.PROFILE
@@ -664,6 +946,7 @@ if __name__ == '__main__':
     asyncio.run(unit())
     asyncio.run(control())
     asyncio.run(fallback())
+    asyncio.run(proto2())
     profile_data()
     parity()
     if a.url:

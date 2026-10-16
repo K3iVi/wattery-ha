@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import CLIENT_VER, SERVER_URL, SN_BLOCK, SOLARMAN
-from .edge import PAIR_PATH, decode_sn
+from .edge import PAIR_PATH, client_caps, decode_sn
 
 _SERVICE = {3: 'read_holding_registers', 4: 'read_input_registers'}
 _WRITE = 'write_multiple_registers'        # FC16 — Deye bere zápis jen takhle, i pro jeden registr
@@ -70,7 +70,7 @@ async def read_sn(hass: HomeAssistant, device_id: str) -> str | None:
 async def pair(hass: HomeAssistant, code: str, sn: str) -> tuple:
     """→ (http kód, odpověď); výjimka = server nedostupný."""
     body = {'code': code.strip().upper(), 'kind': 'ha', 'sn': sn, 'clientVer': CLIENT_VER,
-            'label': 'Home Assistant'}
+            'label': 'Home Assistant', 'caps': client_caps()}
     try:
         return await make_post(hass)(PAIR_PATH, body)
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:

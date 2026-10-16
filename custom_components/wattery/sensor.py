@@ -59,4 +59,8 @@ class WatteryStatusSensor(SensorEntity):
                                if r.fallback else None),
             'fallback_applied': (datetime.fromtimestamp(r.fallback_applied_at, timezone.utc).isoformat()
                                  if r.fallback_applied_at else None),
+            # protokol 2: profil zápisu od serveru a pojistky příkazů (obnova, do kdy platí)
+            'profile': r.profile_id,
+            'leases': [f"{x['id']} do {datetime.fromtimestamp(x['deadline'], timezone.utc).isoformat()}"
+                       for x in r.leases.values()],
         }

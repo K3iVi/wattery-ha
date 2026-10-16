@@ -3,7 +3,8 @@
 Server (monitoring.wattery.cz) určuje, které registry a jak často číst. Se zapnutým přepínačem „Řízení z wattery“
 (výchozí vypnuto) provádí i příkazy platformy (okna TOU, proudy, max. prodej…) místo přes Deye cloud — jen registry
 z povoleného profilu a se zpětným čtením (edge.py). Bez spojení se serverem po platnosti plánu zapíše jednou neutrální
-rozvrh (offline pojistka, stav v HA Store).
+rozvrh (offline pojistka, stav v HA Store). Od 0.4.0 posílá serveru, co umí (`caps`, protokol 2) — u Deye beze změny
+chování, základ pro další značky (pojistky příkazů s obnovou, další přenosy).
 """
 from __future__ import annotations
 
