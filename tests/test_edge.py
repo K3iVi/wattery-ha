@@ -524,6 +524,33 @@ async def fallback():
     check('uložená pojistka mimo profil (jiná verze profilu) → zahodit', r7.fallback is None, r7.state())
 
 
+def profile_data():
+    """Profil zápisu jako data (bez serveru — běží i v CI)."""
+    p = edge.PROFILE
+    check('profil deye-lv@1: limity v datech = limity klienta',
+          p['limits'] == {'perMin': edge.RATE_PER_MIN, 'perHour': edge.RATE_PER_H, 'gapS': edge.WRITE_GAP_S}
+          and p['maxBlock'] == 123, p['limits'])
+    check('profil deye-lv@1: TOU, WRITABLE i hodiny projdou, napětí TOU / Remote Mode / mimo meze ne',
+          edge.write_problem(148, [0, 500, 1300, 1700, 2100, 2330] + [5000] * 6) is None
+          and edge.write_problem(62, [(26 << 8) | 10, (15 << 8) | 18, (5 << 8) | 7]) is None
+          and all(edge.write_problem(a, v) for a, v in ((160, [5200]), (0x044C, [1]), (143, [24001]), (148, [2460]),
+                                                        (172, [0x40]), (108, [True]), (62, [0, 0, 0]))))
+    wp = edge._wp
+    bad = []
+    for pid in ('../x@1', 'deye-lv', 'Deye@1'):
+        try:
+            wp.load(pid, edge.PROFILES_DIR)
+            bad.append(pid)
+        except ValueError:
+            pass
+    try:
+        wp.compile_profile({'id': 'x@1', 'write': [{'addr': 1, 'check': 'neznama'}]})
+        bad.append('neznámá kontrola')
+    except ValueError:
+        pass
+    check('profil: id bez cesty, neznámá kontrola = neplatný profil', not bad, bad)
+
+
 def parity():
     dm = os.path.join(_HERE, '..', '..', 'deye-monitor')
     if not os.path.isdir(os.path.join(dm, 'deye')):
@@ -543,6 +570,19 @@ def parity():
                 diffs.append((a, v))
                 break
     check('profil zápisu: stejné meze a kontroly jako server (všech 65 536 hodnot)', not diffs, diffs[:5])
+    # Profil jsou data (profiles/*.json + write_profile.py): server drží bajtově stejné kopie.
+    cc = os.path.join(_HERE, '..', 'custom_components', 'wattery')
+    same = []
+    for mine, theirs in ((os.path.join(cc, 'write_profile.py'), os.path.join(dm, 'deye', 'edge_profile.py')),
+                         *((os.path.join(cc, 'profiles', f), os.path.join(dm, 'deye', 'edge_profiles', f))
+                           for f in sorted(os.listdir(os.path.join(cc, 'profiles'))))):
+        with open(mine, 'rb') as a, open(theirs, 'rb') as b:
+            same.append((os.path.basename(mine), a.read().replace(b'\r\n', b'\n') == b.read().replace(b'\r\n', b'\n')))
+    check('profil: engine a JSON profily bajtově stejné jako na serveru (edge_profile.py, edge_profiles/)',
+          all(ok for _f, ok in same), same)
+    diffs = [(a, v) for a in sorted(cp) for v in range(0x10000)
+             if (edge_deye.derived_write_problem(a, [v]) is None) != (edge.write_problem(a, [v]) is None)]
+    check('profil zápisu = kód platformy na serveru (WRITABLE, TOU, hodiny — všech 65 536 hodnot)', not diffs, diffs[:5])
 
 
 def _http_post(base):
@@ -597,6 +637,7 @@ if __name__ == '__main__':
     asyncio.run(unit())
     asyncio.run(control())
     asyncio.run(fallback())
+    profile_data()
     parity()
     if a.url:
         asyncio.run(e2e(a.url, a.code, a.sn))

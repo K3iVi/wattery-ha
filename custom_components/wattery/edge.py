@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Awaitable, Callable
 
@@ -91,65 +92,27 @@ def clean_plan(plan) -> list:
 
 
 # ── Co smí wattery do střídače zapsat ───────────────────────────────────────
+# Profil zápisu jsou data: profiles/<id>.json + pojmenované kontroly (write_profile.py, bajtově stejný soubor má server).
+try:
+    from . import write_profile as _wp
+except ImportError:                  # edge.py načtený samostatně ze souboru (testy bez Home Assistantu)
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location('wattery_write_profile', os.path.join(os.path.dirname(__file__),
+                                                                                'write_profile.py'))
+    _wp = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_wp)
 
-def _hhmm(v):
-    return v // 100 <= 23 and v % 100 <= 59
-
-
-def _tou_flags(v):
-    return v & ~0x23 == 0          # bit0 nabíjení ze sítě, bit1 z generátoru, bit5 (0x20) prodej v okně
-
-
-def _clock(addr):
-    def ok(v):
-        hi, lo = v >> 8, v & 0xFF
-        if addr == 62:
-            return 20 <= hi <= 60 and 1 <= lo <= 12          # rok od 2000 | měsíc
-        if addr == 63:
-            return 1 <= hi <= 31 and lo <= 23                # den | hodina
-        return hi <= 59 and lo <= 59                         # minuta | sekunda
-    return ok
-
-
+PROFILES_DIR = os.path.join(os.path.dirname(__file__), 'profiles')
+PROFILE_ID = 'deye-lv@1'
 # Deye SG04LP3 / SG05LP3: vše, co platforma wattery zapisuje (spot — okna TOU, proudy, max. prodej, Low Batt, hodiny).
-# Adresa → (min, max, kontrola hodnoty). Blok FC16 projde jen celý; jiný registr klient nezapíše, ať server pošle cokoli.
-DEYE_PROFILE = {
-    108: (0, 350, None),                  # max. nabíjecí proud (A)
-    109: (0, 350, None),                  # max. vybíjecí proud (A)
-    117: (1, 95, None),                   # Low Batt SOC (%)
-    127: (0, 100, None),                  # nabíjení ze sítě — start SOC (%)
-    128: (0, 350, None),                  # nabíjení ze sítě — proud (A)
-    129: (0, 1, None),                    # nabíjení z generátoru
-    130: (0, 1, None),                    # nabíjení ze sítě
-    133: (0, 2, None),                    # režim gen-portu
-    135: (0, 100, None),                  # Smart Load — vypnout při SOC (%)
-    137: (0, 100, None),                  # Smart Load — zapnout při SOC (%)
-    142: (0, 2, None),                    # pracovní režim
-    143: (0, 24000, None),                # max. prodej do sítě (W)
-    145: (0, 1, None),                    # prodej přebytku (Solar Sell)
-    146: (0, 0xFF, None),                 # TOU zapnuto + dny
-    **{148 + i: (0, 2359, _hhmm) for i in range(6)},          # TOU časy (HHMM)
-    **{154 + i: (0, 0xFFFF, None) for i in range(6)},         # TOU výkony (W)
-    **{166 + i: (0, 100, None) for i in range(6)},            # TOU SOC (%)
-    **{172 + i: (0, 0x23, _tou_flags) for i in range(6)},     # TOU nabíjení / prodej v okně
-    62: ((20 << 8) | 1, (60 << 8) | 12, _clock(62)),          # hodiny: rok | měsíc
-    63: ((1 << 8) | 0, (31 << 8) | 23, _clock(63)),           # den | hodina
-    64: (0, (59 << 8) | 59, _clock(64)),                      # minuta | sekunda
-}
+# Blok FC16 projde jen celý; jiný registr klient nezapíše, ať server pošle cokoli.
+PROFILE = _wp.compile_profile(_wp.load(PROFILE_ID, PROFILES_DIR))
+DEYE_PROFILE = PROFILE['regs']       # adresa → kontrola (registry, které smí klient zapsat)
 
 
 def write_problem(addr, values) -> str | None:
     """None = blok FC16 smí klient zapsat; jinak důvod."""
-    if not isinstance(values, list) or not 1 <= len(values) <= 123:
-        return 'prázdný nebo příliš dlouhý blok'
-    for i, v in enumerate(values):
-        spec = DEYE_PROFILE.get(addr + i)
-        if spec is None:
-            return f'registr {addr + i} mimo profil'
-        lo, hi, ok = spec
-        if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi or (ok and not ok(v)):
-            return f'registr {addr + i}: hodnota {v} mimo meze'
-    return None
+    return _wp.write_problem(PROFILE, addr, values)
 
 
 def _u16_list(v, n) -> bool:
