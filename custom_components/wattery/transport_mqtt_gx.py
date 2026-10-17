@@ -192,7 +192,10 @@ class GxMqtt:
             self._publish(f'R/{self.portal}/keepalive', b'')
 
     def snapshot(self, filters) -> dict:
-        vals = {p: v for p, v in self.values.items() if any(match_filter(f, p) for f in filters)}
+        # Po ztrátě spojení jsou hodnoty staré — neposílat je jako čerstvé (čte se až po znovupřipojení).
+        if not self.connected:
+            raise GxError('GX není připojené')
+        vals ={p: v for p, v in self.values.items() if any(match_filter(f, p) for f in filters)}
         return {'values': vals, 'ts': {p: self.ts.get(p) for p in vals}}
 
     def read_item(self, item: dict) -> dict:

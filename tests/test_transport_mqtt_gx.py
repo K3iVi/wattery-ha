@@ -91,6 +91,12 @@ async def scenario():
         check('klient nikdy neposlal nic jiného než R/<portal>/keepalive',
               b.client_topics and all(x == f'R/{gx_sim.PORTAL}/keepalive' for x in b.client_topics), b.client_topics)
         await c.close()
+        try:
+            c.read_item(PLAN[0])
+            stale = True
+        except gx.GxError:
+            stale = False
+        check('po ztrátě spojení se staré hodnoty nečtou (GxError)', not stale)
     finally:
         await b.stop()
 
