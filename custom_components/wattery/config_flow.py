@@ -22,18 +22,13 @@ from .const import (CONF_CERT, CONF_CLIENT, CONF_CODE, CONF_CONN, CONF_DEVICE, C
                     CONN_ENTITIES, CONN_GX, CONN_SOLARMAN, DOMAIN, ENTITY_SOURCES, GX_HOST_DEFAULT, SOLARMAN)
 from .edge import client_caps
 from .transport_ha_entities import SERVER_BINDS, HaEntities
-from .transport_mqtt_gx import PORT_PLAIN, PORT_TLS, GxError, GxMqtt
+from .transport_mqtt_gx import PORT_PLAIN, PORT_TLS, GxAuthError, GxCertError, GxError, GxMqtt
 from .transport_solarman import read_sn, solarman_ready
 
 _LOGGER = logging.getLogger(__name__)
 _PAIR_ERRORS = {'bad-code': 'bad_code', 'sn-mismatch': 'sn_mismatch', 'unsupported': 'unsupported',
                 'client-unsupported': 'unsupported'}
 _TITLES = {CONN_SOLARMAN: 'wattery – střídač {sn}', CONN_GX: 'wattery – Victron GX', CONN_ENTITIES: 'wattery – {src}'}
-
-
-def _gx_auth(e: Exception) -> bool:
-    msg = str(e)
-    return 'heslo' in msg or 'přístup nepovolen' in msg
 
 
 async def gx_probe(host: str, password: str, port: int | None = None, tls: bool | None = None,
@@ -49,7 +44,7 @@ async def gx_probe(host: str, password: str, port: int | None = None, tls: bool 
             return {CONF_PORT: p, CONF_TLS: t, CONF_SN: gx.portal, CONF_CERT: gx.cert_sha256 if t else None}
         except (GxError, OSError) as e:
             last = e
-            if _gx_auth(e) or 'certifikát' in str(e):
+            if isinstance(e, (GxAuthError, GxCertError)):
                 break                                   # heslo / otisk: s 1883 by to bylo jen horší
         finally:
             await gx.close()
@@ -87,7 +82,7 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
                                        data.get(CONF_TLS), data.get(CONF_CERT))
             except GxError as e:
                 _LOGGER.warning('wattery: GX %s: %s', data[CONF_HOST], e)
-                err = 'gx_auth' if _gx_auth(e) else 'gx_cert' if 'certifikát' in str(e) else (
+                err = 'gx_auth' if isinstance(e, GxAuthError) else 'gx_cert' if isinstance(e, GxCertError) else (
                     'gx_portal' if 'portal' in str(e) else 'gx_failed')
                 return None, {'base': err}
             return found, {}
