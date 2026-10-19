@@ -3,7 +3,9 @@
 Mluví MQTT 3.1.1 na 127.0.0.1 (bez TLS): CONNECT s heslem, SUBSCRIBE s '+'/'#', retained `N/<portal>/system/0/Serial`,
 `R/<portal>/keepalive` (prázdné tělo = pošle vše, `suppress-republish` = jen prodlouží), změny hodnot posílá jen
 během platného keepalive (60 s), PINGREQ. Každé téma, které klient publikuje, si zapíše do `client_topics`
-(test hlídá, že klient nikdy nepošle W/). Portal ID a hodnoty jsou smyšlené (veřejné repo).
+(test hlídá, že klient bez řízení nikdy nepošle W/). Zápis jako na GX: `W/<portal>/<cesta>` {"value": v} změní
+existující cestu (neznámou ignoruje, zapíše do `writes`) a pošle `N/`; `R/<portal>/<cesta>` hodnotu znovu publikuje.
+Portal ID a hodnoty jsou smyšlené (veřejné repo).
 """
 import asyncio
 import json
@@ -71,6 +73,7 @@ class GxBroker:
         self.clock = clock or (lambda: asyncio.get_event_loop().time())
         self.clients = []
         self.client_topics = []
+        self.writes = []                                    # [(cesta, hodnota)] z W/ (i neznámé cesty)
         self.connects = 0
         self.server = None
         self.port = None
@@ -170,6 +173,19 @@ class GxBroker:
                         if not suppress:
                             for p in list(self.tree):
                                 self._pub(c, p)
+                    elif topic.startswith(f'R/{self.portal}/'):          # požadavek na jednu hodnotu
+                        path = topic[len(self.portal) + 3:]
+                        if path in self.tree:
+                            self._pub(c, path)
+                    elif topic.startswith(f'W/{self.portal}/'):          # zápis (jen existující cesta)
+                        path = topic[len(self.portal) + 3:]
+                        try:
+                            v = json.loads(payload)['value']
+                        except (ValueError, KeyError, TypeError):
+                            continue
+                        self.writes.append((path, v))
+                        if path in self.tree:
+                            self.set(path, v)
                 elif kind == 0xC0:                                 # PINGREQ
                     w.write(b'\xd0\x00')
                 elif kind == 0xE0:
