@@ -308,7 +308,7 @@ async def main():
 
     res = await flow.async_init('wattery', context={'source': 'user'})
     check('menu s integrací victron_gx nabízí i čtení z entit', res['type'] == 'menu'
-          and res['menu_options'] == ['solarman', 'gx', 'modbus_tcp', 'entities'], res)
+          and res['menu_options'] == ['solarman', 'gx', 'entities', 'modbus_tcp'], res)
     res = await flow.async_configure(res['flow_id'], {'next_step_id': 'entities'})
     sel = next((k for k in res.get('data_schema', {}).schema if str(k) == 'source_entry'), None)
     opts = res['data_schema'].schema[sel].config['options'] if sel else []

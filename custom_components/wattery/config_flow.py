@@ -36,7 +36,8 @@ _PAIR_ERRORS = {'bad-code': 'bad_code', 'sn-mismatch': 'sn_mismatch', 'unsupport
                 'client-unsupported': 'unsupported'}
 _TITLES = {CONN_SOLARMAN: 'wattery – střídač {sn}', CONN_GX: 'wattery – Victron GX', CONN_ENTITIES: 'wattery – {src}',
            CONN_MODBUS_TCP: 'wattery – střídač {sn}'}
-_MB_ERRORS = {'connect': 'mb_connect', 'busy': 'mb_busy', 'timeout': 'mb_timeout', 'identity': 'mb_identity'}
+_MB_ERRORS = {'connect': 'mb_connect', 'busy': 'mb_busy', 'timeout': 'mb_timeout', 'identity': 'mb_identity',
+              'exception': 'mb_identity'}       # výjimka Modbus na čtení SN = jiné zařízení / jiná mapa
 
 
 async def gx_probe(host: str, password: str, port: int | None = None, tls: bool | None = None,
@@ -134,9 +135,8 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
         return [e for d in ENTITY_SOURCES for e in self.hass.config_entries.async_entries(d) if not e.disabled_by]
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        opts = ['solarman', 'gx', 'modbus_tcp']
-        if self._entity_sources():
-            opts.append('entities')
+        # Kdo už má solax_modbus / victron_gx, toho čteme z entit (§5) → ta volba před Modbus TCP (dongle = 1 spojení).
+        opts = ['solarman', 'gx'] + (['entities'] if self._entity_sources() else []) + ['modbus_tcp']
         return self.async_show_menu(step_id='user', menu_options=opts)
 
     async def async_step_solarman(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
