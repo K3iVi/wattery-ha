@@ -15,7 +15,7 @@ import socket
 import sys
 import tempfile
 import time
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, 'tests'))
@@ -204,6 +204,8 @@ async def main():
     stub_integration(cfg, 'solax_modbus')
     hass = HomeAssistant(cfg)
     hass.config.skip_pip = True
+    hass.config.components.add('http')    # kalendář plánu závisí na http (ve skutečném HA běží vždy) — jen atrapa
+    hass.http = SimpleNamespace(register_view=lambda *a, **k: None)
     loader.async_setup(hass)
     await dr.async_load(hass)
     await er.async_load(hass)
@@ -264,7 +266,8 @@ async def main():
     await hass.async_block_till_done()
     gx_entry = next(e for e in hass.config_entries.async_entries('wattery') if e.data.get('conn') == 'gx_mqtt')
     ents = er.async_entries_for_config_entry(er.async_get(hass), gx_entry.entry_id)
-    check('GX: senzor stavu + přepínač řízení', sorted(e.domain for e in ents) == ['sensor', 'switch'], ents)
+    check('GX: senzor stavu + plánu, kalendář plánu, přepínač řízení',
+          sorted(e.domain for e in ents) == ['calendar', 'sensor', 'sensor', 'switch'], ents)
     runner = gx_entry.runtime_data.runner
 
     def mqtt_reads(tok):
@@ -343,7 +346,8 @@ async def main():
     await hass.async_block_till_done()
     ent_entry = next(e for e in hass.config_entries.async_entries('wattery') if e.data.get('conn') == 'ha_entities')
     ents = er.async_entries_for_config_entry(reg, ent_entry.entry_id)
-    check('entity: jen senzor stavu, bez přepínače řízení', [e.domain for e in ents] == ['sensor'], ents)
+    check('entity: senzory stavu a plánu + kalendář plánu, bez přepínače řízení',
+          sorted(e.domain for e in ents) == ['calendar', 'sensor', 'sensor'], ents)
     tok = ent_entry.data['token']
 
     def ha_reads():

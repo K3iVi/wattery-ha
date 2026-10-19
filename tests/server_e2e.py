@@ -198,9 +198,70 @@ async def main():
               [(x['id'], x['status'], x['source']) for x in log])
     finally:
         task.cancel()
-    print('VŠE OK' if not FAILS else f'SELHALO: {", ".join(FAILS)}')
+
+
+async def plan_e2e():
+    """A9: plán jako data — skutečný deye/plan_neutral.py → sync → klient (clean_battery_plan, plan_slot, export)."""
+    from datetime import datetime
+    from deye import plan_neutral
+    sid, sn, uid = 990102, 'E2ESN00002', 902
+    store.upsert_station({'id': sid, 'name': 'E2E plán'}, user_id=uid)
+    store.upsert_device({'deviceSn': sn, 'deviceType': 'INVERTER'}, station_id=sid, user_id=uid)
+    store.grant_station_access(sid, uid)
+    st, res = srv.pair({'code': srv.create_pair_code(sid, uid)['code'], 'kind': 'ha', 'sn': sn,
+                        'clientVer': 'ha-int/e2e', 'caps': cedge.client_caps()})
+    now = time.time()
+    tz = plan_neutral._tz()
+    loc = datetime.fromtimestamp(now, tz)
+    q0 = (loc.hour * 60 + loc.minute) // 15
+    acts = [{'gridToBattKwh': 1.25}, {}, {'battToGridKwh': 0.75}, {'battToLoadKwh': 0.2}]
+    trace = [dict(acts[i // 8 % 4], date=loc.date().isoformat(), qh=q0 + i, dayOffset=0, socPct=40 + i, buyCzk=3.2,
+                  spotSellCzk=1.8) for i in range(96 - q0)]
+    neutral = plan_neutral.view({'ok': True, 'simTrace': trace}, {'reservePct': 12}, now)
+    store.save_spot_auto_config(sid, uid, sn, True, 'sell', {'reservePct': 12}, int(now))
+    store.set_spot_auto_proposal(sid, {'ok': True, 'neutral': neutral}, int(now))
+
+    async def post(path, body, tok):
+        cl = srv.client_by_token(tok)
+        return (401, {'ok': False}) if cl is None else srv.sync(cl, body)
+    regs = edge_sim.fake_regs(sn, now)
+
+    async def read_block(fc, addr, count):
+        return [regs.get(a, 0) for a in range(addr, addr + count)]
+    runner = cedge.EdgeRunner(read_block=read_block, post=post, token=res.get('token'), sn=sn,
+                              read_plan=res.get('readPlan') or [], version='ha-int/e2e', backend='e2e')
+    await runner.tick()
+    bp = runner.battery_plan
+    check('A9 E2E: plán ze serveru projde kontrolou klienta beze ztráty', st == 200 and bp
+          and bp['id'] == neutral['id'] and bp['slots'] == neutral['slots']
+          and [w['action'] for w in bp['windows']] == [w['action'] for w in neutral['windows']], (st, bp and bp['id']))
+    i = cedge.plan_slot(bp, now)
+    check('A9 E2E: teď běží 1. slot (nákup ze sítě 5 kW)', i == 0 and bp['slots']['action'][0] == 'charge_grid'
+          and bp['slots']['powerW'][0] == 5000, (i, bp and bp['slots']['action'][:2]))
+    ex = cedge.plan_export(bp, now)
+    check('A9 E2E: export pro službu get_plan', ex and len(ex['slots']) == len(trace) and ex['reserve_soc'] == 12.0
+          and ex['windows'][0]['action'] == 'charge_grid', ex and ex['windows'][:1])
+    sync_ids = []
+    orig = post
+
+    async def post2(path, body, tok):
+        sync_ids.append(body['client'].get('planId'))
+        code, r = await orig(path, body, tok)
+        sync_ids.append('plan' in r)
+        return code, r
+    runner._post = post2
+    runner._last_sync = 0.0
+    await runner.tick()
+    check('A9 E2E: další sync posílá planId a server celý plán znovu neposílá', sync_ids[:2] == [neutral['id'], False],
+          sync_ids)
+    store.save_spot_auto_config(sid, uid, sn, False, 'sell', {'reservePct': 12}, int(now) + 1)
+    runner._last_sync = 0.0
+    await runner.tick()
+    check('A9 E2E: vypnutý spot → klient plán zahodí', runner.battery_plan is None, runner.battery_plan)
 
 
 if __name__ == '__main__':
     asyncio.run(main())
+    asyncio.run(plan_e2e())
+    print('VŠE OK' if not FAILS else f'SELHALO: {", ".join(FAILS)}')
     sys.exit(1 if FAILS else 0)

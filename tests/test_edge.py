@@ -614,7 +614,7 @@ async def proto2():
     print('— protokol 2 (caps, leases, readBack, profil, mqtt)')
     caps = edge.client_caps()
     check('caps: Modbus, vestavěné profily, lease + readBack', caps == {
-        'proto': 2, 'transports': ['modbus'], 'profiles': sorted(edge.PROFILES), 'features': ['lease', 'readBack']}
+        'proto': 2, 'transports': ['modbus'], 'profiles': sorted(edge.PROFILES), 'features': ['lease', 'readBack', 'plan']}
         and 'deye-lv@1' in caps['profiles'], caps)
     check('caps: zapojený přenos mqtt se hlásí', edge.client_caps({'mqtt': object()})['transports'] == ['modbus', 'mqtt'])
     plan = [{'type': 'mqtt', 'name': 'dess', 'dev': 'c0ffee000001', 'base': FakeGx.D, 'paths': ['Schedule/+/Soc', 'Mode'],
@@ -1014,6 +1014,113 @@ async def e2e(url, code, sn):
     except edge.Revoked:
         check('E2E špatný token → Revoked', True)
 
+def mk_battery_plan(t0, pattern, pid='p#aaa', valid_s=3 * 3600, tz=None):
+    """Neutrální plán jako ze serveru (deye/plan_neutral.py): sloty po 900 s od t0, okna ze shodných akcí."""
+    from datetime import datetime, timedelta, timezone
+    tz = tz or timezone(timedelta(hours=2))
+    t = [t0 + 900 * i for i in range(len(pattern))]
+    pw = [5000 if a == 'charge_grid' else 3000 if a == 'discharge_grid' else 0 for a in pattern]
+    soc = [50.0 + i for i in range(len(pattern))]
+    iso = lambda x: datetime.fromtimestamp(x, tz).isoformat()
+    wins, i0 = [], 0
+    for i in range(1, len(t) + 1):
+        if i == len(t) or pattern[i] != pattern[i0]:
+            wins.append({'from': iso(t[i0]), 'to': iso(t[i] if i < len(t) else t[-1] + 900), 'action': pattern[i0],
+                         'powerW': max(pw[i0:i]), 'socEnd': soc[i - 1]})
+            i0 = i
+    return {'v': 1, 'id': pid, 'computedAt': t0, 'validUntil': t0 + valid_s, 'reservePct': 15.0, 'currency': 'CZK',
+            'tz': 'Europe/Prague', 'windows': wins,
+            'slots': {'t': t, 'action': list(pattern), 'powerW': pw, 'soc': soc, 'buy': [3.1] * len(t),
+                      'sell': [1.9] * len(t)}}
+
+
+async def plan_a9():
+    print('— plán jako data (A9: planId, plan, uložení, sloty, okna, export)')
+    check('caps: vlastnost plan', 'plan' in edge.client_caps()['features'])
+    PAT = ['charge_grid'] * 4 + ['hold'] * 4 + ['self_use'] * 4
+    p = mk_battery_plan(1_000_000 - 1_000_000 % 900, PAT)
+    c = edge.clean_battery_plan(p)
+    check('clean: platný plán projde, okna dostanou fromTs / toTs', c and c['id'] == 'p#aaa'
+          and [w['action'] for w in c['windows']] == ['charge_grid', 'hold', 'self_use']
+          and c['windows'][1]['fromTs'] == p['slots']['t'][4] and c['windows'][-1]['toTs'] == p['slots']['t'][-1] + 900, c)
+    import copy
+    bad = []
+    for mut in (lambda q: q.update(v=2), lambda q: q['slots']['action'].__setitem__(0, 'sell_all'),
+                lambda q: q['slots']['soc'].pop(), lambda q: q['slots']['t'].__setitem__(1, q['slots']['t'][0]),
+                lambda q: q['windows'][0].update(to=q['windows'][0]['from']),
+                lambda q: q['windows'][0].update(**{'from': '2026-10-19T14:00:00'}),
+                lambda q: q.update(validUntil='zítra'), lambda q: q['slots'].update(t=[]),
+                lambda q: q['slots']['buy'].__setitem__(0, '3,1')):
+        q = copy.deepcopy(p)
+        mut(q)
+        bad.append(edge.clean_battery_plan(q))
+    check('clean: verze, neznámá akce, různé délky, čas neroste, prázdné okno, okno bez zóny, validUntil, '
+          'prázdné sloty, text místo čísla → None', bad == [None] * 9, bad)
+    r, e = _mk()
+    S, clock = e['srv'], e['clock']
+    clock.t = p['slots']['t'][0] + 60
+    srv_plan = {'p': p, 'id': p['id']}
+
+    async def post(path, body, token):
+        e['posts'].append(body)
+        res = {'ok': True, 'serverTime': clock.t, 'nextPollS': 5, 'control': 'on', 'commands': [], 'accepted': 0}
+        if srv_plan['id'] is not False:
+            res['planId'] = srv_plan['id']
+            if srv_plan['id'] and body['client'].get('planId') != srv_plan['id']:
+                res['plan'] = srv_plan['p']
+        return 200, res
+    r._post = post
+    await _step(r, e)
+    check('1. sync bez planId → plán přijat a uložen (HA Store)', r.battery_plan and r.battery_plan['id'] == 'p#aaa'
+          and 'planId' not in e['posts'][-1]['client'] and (e['saved'][-1].get('plan') or {}).get('id') == 'p#aaa',
+          (r.battery_plan, e['posts'][-1]['client']))
+    n_saved = len(e['saved'])
+    await _step(r, e)
+    check('další sync posílá planId, stejné id → beze změny a bez ukládání',
+          e['posts'][-1]['client'].get('planId') == 'p#aaa' and len(e['saved']) == n_saved)
+    i = edge.plan_slot(r.battery_plan, clock.t)
+    check('plan_slot / plan_window: teď 1. slot nákupu, okno 0', i == 0 and edge.plan_window(r.battery_plan, clock.t) == 0
+          and edge.plan_slot(r.battery_plan, p['slots']['t'][5] + 1) == 5
+          and edge.plan_window(r.battery_plan, p['slots']['t'][5] + 1) == 1, i)
+    check('plan_slot: před začátkem, po konci slotů a po validUntil → None',
+          edge.plan_slot(r.battery_plan, p['slots']['t'][0] - 1) is None
+          and edge.plan_slot(r.battery_plan, p['slots']['t'][-1] + 900) is None
+          and edge.plan_slot(dict(r.battery_plan, validUntil=clock.t), clock.t) is None)
+    x = edge.plan_export(r.battery_plan, clock.t)
+    check('plan_export: 3 okna a 12 čtvrthodin s ISO časy, akce, výkon, SOC, ceny', x and len(x['slots']) == 12
+          and len(x['windows']) == 3 and x['slots'][0]['action'] == 'charge_grid' and x['slots'][0]['power_w'] == 5000
+          and x['slots'][0]['price_buy'] == 3.1 and x['slots'][-1]['end'] == edge._iso(p['slots']['t'][-1] + 900)
+          and x['windows'][0]['target_soc'] == 53.0, x and x['slots'][:1])
+    check('plan_export po validUntil → None', edge.plan_export(r.battery_plan, p['validUntil']) is None)
+    p2 = mk_battery_plan(p['slots']['t'][0], ['discharge_grid'] * 12, pid='p#bbb')
+    srv_plan.update(p=p2, id='p#bbb')
+    await _step(r, e)
+    check('nové id → nový plán přijat a uložen', r.battery_plan['id'] == 'p#bbb'
+          and e['saved'][-1]['plan']['id'] == 'p#bbb')
+    srv_plan.update(p=dict(p2, id='p#ccc', slots=dict(p2['slots'], action=['x'] * 12)), id='p#ccc')
+    await _step(r, e)
+    check('neplatný plán od serveru → ponechán předchozí', r.battery_plan['id'] == 'p#bbb')
+    srv_plan.update(id=False)
+    await _step(r, e)
+    check('server bez vlastnosti plan (bez planId) → plán beze změny', r.battery_plan['id'] == 'p#bbb')
+    srv_plan.update(id=None)
+    await _step(r, e)
+    check('planId None → plán zahozen i z uloženého stavu', r.battery_plan is None and e['saved'][-1]['plan'] is None)
+    r2 = edge.EdgeRunner(read_block=None, post=post, token='T', read_plan=[], version='t', backend='f',
+                         state={'plan': p2})
+    check('obnova z uloženého stavu (restart HA)', r2.battery_plan and r2.battery_plan['id'] == 'p#bbb')
+    # změna času: slot 02:45 letního času trvá do 03:00 zimního (1 h 15 min)
+    from datetime import datetime, timedelta, timezone
+    t245 = int(datetime(2026, 10, 25, 2, 45, tzinfo=timezone(timedelta(hours=2))).timestamp())
+    dst = mk_battery_plan(t245, ['hold', 'charge_grid'])
+    dst['slots']['t'][1] = t245 + 4500
+    dst['windows'][0]['to'] = dst['windows'][1]['from'] = datetime.fromtimestamp(t245 + 4500, timezone(timedelta(hours=1))).isoformat()
+    dst['windows'][1]['to'] = datetime.fromtimestamp(t245 + 5400, timezone(timedelta(hours=1))).isoformat()
+    dc = edge.clean_battery_plan(dst)
+    check('změna času: dvojitá hodina — slot trvá do dalšího t, okno s offsetem +01:00',
+          dc and edge.plan_slot(dc, t245 + 4000) == 0 and edge.plan_slot(dc, t245 + 4500) == 1
+          and dc['windows'][1]['fromTs'] == t245 + 4500, dc and dc['windows'])
+
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
@@ -1026,6 +1133,7 @@ if __name__ == '__main__':
     asyncio.run(fallback())
     asyncio.run(proto2())
     asyncio.run(transports_a5())
+    asyncio.run(plan_a9())
     profile_data()
     parity()
     if a.url:

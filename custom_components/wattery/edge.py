@@ -2,9 +2,9 @@
 
 Protokol (server monitoring.wattery.cz, `deye/edge.py` + `deye/edge_cmd.py`):
   POST /api/edge/v1/pair  {code, kind, sn, clientVer, label, caps}  → {token, readPlan, nextPollS, profile?}
-  POST /api/edge/v1/sync  (Bearer token) {client: {ver, backend, ctl, caps}, reads, results, fallbackReport?,
-                          leaseReport?} → {readPlan, nextPollS, commands, control, accepted, ignored, profile?,
-                          fallback | leases, fallbackAck?, leaseAck?}
+  POST /api/edge/v1/sync  (Bearer token) {client: {ver, backend, ctl, caps, planId?}, reads, results,
+                          fallbackReport?, leaseReport?} → {readPlan, nextPollS, commands, control, accepted, ignored,
+                          profile?, fallback | leases, fallbackAck?, leaseAck?, planId?, plan?}
 
 Co a jak často číst, určuje server (`readPlan`) — nový registr = změna jen na serveru.
 
@@ -51,6 +51,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,7 +80,11 @@ FALLBACK_TRIES, FALLBACK_RETRY_S = 3, 300   # ha-solarman neodpověděl → zkus
 FALLBACK_SAVE_S = 300         # platnost se posouvá každým sync; ukládat ji nejvýš jednou za 5 min
 # Protokol 2
 PROTO = 2
-FEATURES = ('lease', 'readBack')
+FEATURES = ('lease', 'readBack', 'plan')
+# Plán jako data (0.6.0, A9): neutrální plán stanice (server `deye/plan_neutral.py`) — jen informace pro automatizace
+PLAN_ACTIONS = ('charge_grid', 'discharge_grid', 'hold', 'no_export', 'self_use')
+PLAN_MAX_SLOTS = 400          # čtvrthodin (server posílá nejvýš ~140 = do konce zítřka)
+PLAN_SLOT_S = 900
 NAMED_TYPES = ('mqtt', 'ha_entity')    # přenosy mimo ha-solarman (zapojuje __init__, jen když jsou nastavené)
 DOMAIN_RE = re.compile(r'^[a-z0-9_]{1,40}$')   # doména integrace HA v caps.integrations (stejně jako server)
 MAX_READS = 16                # položek čtení v jednom sync (strop serveru protokolu 1)
@@ -293,6 +298,100 @@ def clean_fallback(fb) -> dict | None:
     return {'id': fb['id'], 'writes': out}
 
 
+def _num_or_none(v) -> bool:
+    return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
+
+
+def clean_battery_plan(p) -> dict | None:
+    """Neutrální plán ze serveru / z uloženého stavu → kopie nebo None. Projde jen celý a konzistentní: souběžná pole
+    slotů stejné délky, čas slotů roste, akce ze známých kódů, okna s ISO časy (server `deye/plan_neutral.py`)."""
+    if not isinstance(p, dict) or p.get('v') != 1 or not isinstance(p.get('id'), str) or not 1 <= len(p['id']) <= 40:
+        return None
+    sl, wins = p.get('slots'), p.get('windows')
+    if not isinstance(sl, dict) or not isinstance(wins, list) or len(wins) > PLAN_MAX_SLOTS:
+        return None
+    t = sl.get('t')
+    if not isinstance(t, list) or not 1 <= len(t) <= PLAN_MAX_SLOTS:
+        return None
+    n = len(t)
+    cols = {k: sl.get(k) for k in ('action', 'powerW', 'soc', 'buy', 'sell')}
+    if any(not isinstance(v, list) or len(v) != n for v in cols.values()):
+        return None
+    if (not all(isinstance(x, int) and not isinstance(x, bool) for x in t) or any(b <= a for a, b in zip(t, t[1:]))
+            or any(a not in PLAN_ACTIONS for a in cols['action'])
+            or not all(_num_or_none(x) for k in ('powerW', 'soc', 'buy', 'sell') for x in cols[k])):
+        return None
+    try:
+        valid, computed = int(p['validUntil']), int(p['computedAt'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    out_w = []
+    for w in wins:
+        if (not isinstance(w, dict) or w.get('action') not in PLAN_ACTIONS or not isinstance(w.get('from'), str)
+                or not isinstance(w.get('to'), str) or not _num_or_none(w.get('powerW'))
+                or not _num_or_none(w.get('socEnd'))):
+            return None
+        try:
+            a, b = datetime.fromisoformat(w['from']), datetime.fromisoformat(w['to'])
+        except ValueError:
+            return None
+        if a.tzinfo is None or b.tzinfo is None or b <= a:
+            return None
+        out_w.append(dict({k: w.get(k) for k in ('from', 'to', 'action', 'powerW', 'socEnd')},
+                          fromTs=int(a.timestamp()), toTs=int(b.timestamp())))
+    reserve = p.get('reservePct')
+    return {'v': 1, 'id': p['id'], 'computedAt': computed, 'validUntil': valid,
+            'reservePct': reserve if _num_or_none(reserve) else None,
+            'currency': p['currency'] if isinstance(p.get('currency'), str) and len(p['currency']) <= 8 else None,
+            'tz': p['tz'] if isinstance(p.get('tz'), str) and len(p['tz']) <= 64 else None,
+            'slots': {'t': list(t), **{k: list(v) for k, v in cols.items()}}, 'windows': out_w}
+
+
+def plan_slot(plan: dict | None, now: float) -> int | None:
+    """Index slotu, který běží v čase `now` (slot i trvá do t[i+1], poslední PLAN_SLOT_S); None = plán neplatí
+    (chybí, vypršel validUntil, `now` mimo rozsah)."""
+    if not plan or now >= plan['validUntil']:
+        return None
+    t = plan['slots']['t']
+    if now < t[0] or now >= t[-1] + PLAN_SLOT_S:
+        return None
+    lo, hi = 0, len(t) - 1
+    while lo < hi:                          # poslední t[i] <= now
+        mid = (lo + hi + 1) // 2
+        if t[mid] <= now:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def plan_window(plan: dict | None, now: float) -> int | None:
+    """Index okna plánu, které běží v čase `now`; None = plán neplatí nebo okno chybí."""
+    if plan_slot(plan, now) is None:
+        return None
+    return next((i for i, w in enumerate(plan['windows']) if w['fromTs'] <= now < w['toTs']), None)
+
+
+def _iso(ts) -> str | None:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts is not None else None
+
+
+def plan_export(plan: dict | None, now: float) -> dict | None:
+    """Plán pro službu `wattery.get_plan` (odpověď do skriptu): okna a čtvrthodiny jako seznamy slovníků, časy ISO.
+    None = plán není nebo vypršel."""
+    if not plan or now >= plan['validUntil']:
+        return None
+    sl, t = plan['slots'], plan['slots']['t']
+    ends = t[1:] + [t[-1] + PLAN_SLOT_S]
+    return {'id': plan['id'], 'computed_at': _iso(plan['computedAt']), 'valid_until': _iso(plan['validUntil']),
+            'reserve_soc': plan['reservePct'], 'currency': plan['currency'],
+            'windows': [{'start': w['from'], 'end': w['to'], 'action': w['action'], 'power_w': w['powerW'],
+                         'target_soc': w['socEnd']} for w in plan['windows']],
+            'slots': [{'start': _iso(t[i]), 'end': _iso(ends[i]), 'action': sl['action'][i], 'power_w': sl['powerW'][i],
+                       'soc': sl['soc'][i], 'price_buy': sl['buy'][i], 'price_sell': sl['sell'][i]}
+                      for i in range(len(t))]}
+
+
 def station_fallback(lease, sn) -> dict | None:
     """Pojistka stanice z `leases` → v1 `fallback` {id, validUntil, writes}, když má jeho tvar (jen zápisy FC16 tohoto
     střídače v profilu Deye) — jinak None (pak ji klient drží jako obecnou pojistku)."""
@@ -360,6 +459,7 @@ class EdgeRunner:
         self._sync_failed = False            # poslední sync nedošel (síť / 5xx) — jen tehdy pojistka
         # pojistky příkazů (protokol 2): id → {id, source, onExpire, refresh, deadline, appliedAt, …}
         self.leases: dict = {}
+        self.battery_plan: dict | None = None    # neutrální plán stanice (A9) — senzor, kalendář, wattery.get_plan
         self._lease_reports: list = []
         self._lease_saved: dict = {}
         self.refreshes = 0
@@ -377,6 +477,7 @@ class EdgeRunner:
             self.fallback = None
         rep = st.get('report')
         self._fb_report = rep if isinstance(rep, dict) and isinstance(rep.get('id'), str) else None
+        self.battery_plan = clean_battery_plan(st.get('plan'))   # po restartu HA platí do validUntil
         pid = st.get('profile')
         if isinstance(pid, str) and _wp.ID_RE.match(pid):
             self.profile_id = pid
@@ -400,7 +501,7 @@ class EdgeRunner:
 
     def state(self) -> dict:
         return {'fallback': self.fallback, 'report': self._fb_report, 'appliedAt': self.fallback_applied_at,
-                'profile': self.profile_id, 'leaseReports': list(self._lease_reports),
+                'profile': self.profile_id, 'leaseReports': list(self._lease_reports), 'plan': self.battery_plan,
                 'leases': [{k: x.get(k) for k in ('id', 'source', 'onExpire', 'refresh', 'deadline', 'appliedAt')}
                            for x in self.leases.values()]}
 
@@ -413,6 +514,25 @@ class EdgeRunner:
                 self._on_persist(self.state())
             except Exception:  # noqa: BLE001 — uložení nesmí shodit smyčku
                 _LOGGER.exception('wattery: uložení stavu offline pojistky selhalo')
+
+    def _accept_plan(self, res: dict) -> None:
+        """Plán jako data (A9): `planId` přijde vždy (None = plán není / vypršel → zahodit), celý `plan` jen při změně.
+        Server bez vlastnosti `plan` klíč nepošle → beze změny."""
+        if 'planId' not in res:
+            return
+        pid, cur = res['planId'], self.battery_plan
+        if pid is None:
+            new = None
+        elif 'plan' in res:
+            new = clean_battery_plan(res['plan'])
+            if new is None or new['id'] != pid:
+                _LOGGER.warning('wattery: plán od serveru je neplatný — ponechán předchozí')
+                return
+        else:
+            return                           # stejné id (jiné bez plánu nepřijde) → beze změny
+        if (new or {}).get('id') != (cur or {}).get('id'):
+            self.battery_plan = new
+            self._persist()
 
     def _accept_fallback(self, res: dict, now: float) -> None:
         """Pojistka z odpovědi sync. validUntil je čas serveru → převést na hodiny klienta (serverTime)."""
@@ -782,6 +902,8 @@ class EdgeRunner:
     async def _sync(self, now, reads) -> None:
         body = {'client': {'ver': self._version, 'backend': self._backend,
                            'ctl': 'on' if self.control_enabled else 'off', 'caps': self.caps}, 'reads': reads}
+        if self.battery_plan:
+            body['client']['planId'] = self.battery_plan['id']
         sent = self._pending[:MAX_RESULTS]
         if sent:
             body['results'] = sent
@@ -824,6 +946,7 @@ class EdgeRunner:
             await self._ensure_profile()
             self._accept_leases(res, now)
             self._accept_fallback(res, now)
+            self._accept_plan(res)
             del self._pending[:len(sent)]
             plan, items = clean_plan(res.get('readPlan')), clean_items(res.get('readPlan'), self._transports)
             plan = plan if self._read_block else []

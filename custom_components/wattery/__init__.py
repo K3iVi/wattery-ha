@@ -10,33 +10,46 @@ Připojení (od 0.5.0, jedna položka = jedno připojení):
 - Victron GX přímo přes MQTT v místní síti (`transport_mqtt_gx`; zatím jen čtení);
 - jen čtení z entit integrace, kterou zákazník už má (`transport_ha_entities`, např. victron_gx) — bez přepínače
   řízení, žádné druhé spojení na zařízení.
+
+Plán baterie jako data (od 0.6.0): senzor „Plán baterie“ (akce teď), kalendář s okny a služba `wattery.get_plan`
+(celý plán po čtvrthodinách do skriptu). Jen čtení — kdo nechce řízení z wattery, provede plán vlastní automatizací.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from homeassistant.config_entries import ConfigEntry
+import voluptuous as vol
+
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.typing import ConfigType
 
 from . import api
 from .const import (BACKENDS, CLIENT_VER, CONF_CERT, CONF_CONN, CONF_DEVICE, CONF_FRAMING, CONF_HOST, CONF_PASSWORD,
                     CONF_PORT, CONF_READ_PLAN, CONF_SN, CONF_SOURCE, CONF_SOURCE_DOMAIN, CONF_TLS, CONF_TOKEN,
                     CONF_UNIT, CONN_ENTITIES, CONN_GX, CONN_MODBUS_TCP, CONN_SOLARMAN, DOMAIN, SOLARMAN, VERSION)
-from .edge import EdgeRunner, Revoked
+from .edge import EdgeRunner, Revoked, plan_export
 from .transport_ha_entities import HaEntities, hub_prefix
 from .transport_mqtt_gx import GxMqtt
 from .transport_modbus_tcp import ModbusTcp
 from .transport_solarman import SolarmanModbus
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
-READ_ONLY_PLATFORMS = [Platform.SENSOR]      # entity jiné integrace: řídit se přes ně nedá → bez přepínače
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.CALENDAR]
+READ_ONLY_PLATFORMS = [Platform.SENSOR, Platform.CALENDAR]   # entity jiné integrace: řídit se přes ně nedá → bez přepínače
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+SERVICE_GET_PLAN = 'get_plan'
+ATTR_ENTRY = 'config_entry_id'
+GET_PLAN_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY): cv.string})
 STORAGE_VERSION = 1
 GX_RETRY_MIN_S, GX_RETRY_MAX_S = 10, 300     # GX nedostupné → zkusit znovu (zdvojovat do 5 min)
 
@@ -88,6 +101,26 @@ async def _gx_loop(gx) -> None:
             await gx.close()
         await asyncio.sleep(delay)
         delay = min(GX_RETRY_MAX_S, delay * 2)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Služba `wattery.get_plan` (jen čtení): plán baterie každého načteného připojení (nebo jednoho)."""
+
+    async def get_plan(call: ServiceCall) -> ServiceResponse:
+        want, now, out = call.data.get(ATTR_ENTRY), time.time(), []
+        for e in hass.config_entries.async_entries(DOMAIN):
+            if (want and e.entry_id != want) or e.state is not ConfigEntryState.LOADED:
+                continue
+            out.append({'config_entry_id': e.entry_id, 'title': e.title, 'sn': e.data.get(CONF_SN),
+                        'plan': plan_export(e.runtime_data.runner.battery_plan, now)})
+        if want and not out:
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key='entry_not_loaded',
+                                         translation_placeholders={'entry': want})
+        return {'plans': out}
+
+    hass.services.async_register(DOMAIN, SERVICE_GET_PLAN, get_plan, schema=GET_PLAN_SCHEMA,
+                                 supports_response=SupportsResponse.ONLY)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: WatteryConfigEntry) -> bool:

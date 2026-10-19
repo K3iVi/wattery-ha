@@ -102,11 +102,26 @@
           "error": "Error",
           "revoked": "Revoked"
         }
+      },
+      "plan": {
+        "name": "Battery plan",
+        "state": {
+          "charge_grid": "Grid charging",
+          "discharge_grid": "Battery export",
+          "hold": "Hold battery",
+          "no_export": "No export",
+          "self_use": "Self-consumption"
+        }
       }
     },
     "switch": {
       "control": {
         "name": "Control from wattery"
+      }
+    },
+    "calendar": {
+      "plan": {
+        "name": "Battery plan"
       }
     }
   },
@@ -116,6 +131,23 @@
         "tcp": "Modbus TCP",
         "rtu": "RTU over TCP"
       }
+    }
+  },
+  "services": {
+    "get_plan": {
+      "name": "Battery plan",
+      "description": "Returns the wattery battery plan per quarter-hour (action, power, SOC, prices) to a script or automation. Read-only.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Connection",
+          "description": "Only this wattery connection (all when empty)."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "entry_not_loaded": {
+      "message": "wattery connection {entry} does not exist or is not loaded."
     }
   }
 }

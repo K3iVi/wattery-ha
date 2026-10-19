@@ -91,6 +91,40 @@ Při přidání integrace se nejdřív vybírá, jak Home Assistant zařízení 
 
 Při opakovaném párování stejného zařízení integrace skončí dřív, než kód pošle do wattery.
 
+## Verze 0.6.0 — plán baterie jako data
+
+Když má elektrárna ve wattery zapnuté obchodování na spotu, posílá wattery do Home Assistantu i plán baterie
+(po čtvrthodinách do konce dne se známými cenami, přepočet zhruba jednou za hodinu). Plán je jen informace —
+do střídače zapisuje dál jen přepínač „Řízení z wattery“. Kdo chce řídit sám, provede plán vlastní automatizací.
+
+- **Senzor „Plán baterie“** — co má baterie dělat teď: `charge_grid` (nabíjení ze sítě), `discharge_grid` (prodej
+  z baterie), `hold` (podržet baterii, spotřeba ze sítě), `no_export` (bez přetoku do sítě — záporná cena),
+  `self_use` (samospotřeba). Atributy: `until` (konec akce), `power_w` (výkon nákupu / prodeje za celou
+  elektrárnu), `target_soc` (SOC na konci akce), `reserve_soc`, `price_buy` / `price_sell` a `currency`,
+  `valid_until`, `computed_at`, `next` (dalších 6 akcí).
+- **Kalendář „Plán baterie“** — akce kromě samospotřeby jako události („Nabíjení ze sítě 5 kW → 80 %“). Automatizace
+  stačí spustit triggerem kalendáře (začátek / konec, i s předstihem); popis události nese `action`, `power_w`
+  a `target_soc`.
+- **Služba `wattery.get_plan`** — celý plán po čtvrthodinách (akce, výkon, SOC, ceny) do skriptu (odpověď služby).
+
+Plán přežije restart Home Assistantu a platí do `valid_until` (3 hodiny od výpočtu). Bez nového plánu jsou senzor
+i kalendář nedostupné — doporučujeme pak vrátit střídač do samospotřeby. Když obchodování ve wattery vypnete,
+plán zmizí.
+
+```yaml
+automation:
+  - alias: Nabíjení ze sítě podle wattery
+    triggers:
+      - trigger: calendar
+        event: start
+        entity_id: calendar.wattery_2400000001_plan_baterie
+    conditions:
+      - condition: template
+        value_template: "{{ 'action: charge_grid' in trigger.calendar_event.description }}"
+    actions:
+      - action: script.nabijeni_ze_site      # váš skript pro střídač
+```
+
 ---
 
 ## English
@@ -127,6 +161,15 @@ offers its entities instead), or read-only from the entities of an
 integration you already have (Victron GX or SolaX Modbus; no extra connection to the device, no control switch; a
 Solax G4 has no serial number in its entities, so wattery pairs it only with a plant that has a single Solax).
 
+**0.6.0 — battery plan as data:** when spot trading is on for the plant, wattery also sends the battery plan
+(quarter-hours until the end of the last day with known prices, recomputed about hourly). It is information only;
+writing to the inverter still requires the *Control from wattery* switch. A *Battery plan* sensor (now:
+`charge_grid` / `discharge_grid` / `hold` / `no_export` / `self_use`; attributes `until`, `power_w`, `target_soc`,
+`reserve_soc`, prices, `valid_until`, `next`), a *Battery plan* calendar (all actions except self-consumption as
+events, with `action`, `power_w`, `target_soc` in the description — use a calendar trigger) and the
+`wattery.get_plan` service (whole plan per quarter-hour as a response). The plan survives restarts and is valid
+for 3 hours; without a new one the entities become unavailable (fall back to self-consumption).
+
 ## Vývoj
 
 - `python tests/test_edge.py` — testy jádra bez Home Assistantu (čtení, řízení, offline pojistka, shoda profilu se serverem,
@@ -137,4 +180,6 @@ Solax G4 has no serial number in its entities, so wattery pairs it only with a p
 - `<venv>/python tests/ha_core_flow.py` — volba připojení: Victron GX proti simulátoru (1883 i TLS s otiskem),
   čtení z entit jiné integrace, Solax přes LAN dongle proti simulátoru (`tests/solax_dongle_sim.py`: obsazený
   dongle, jiná jednotka, souběh se SolaX Modbus), opakované a nové spárování.
+- `<venv>/python tests/ha_core_plan.py` — plán baterie: senzor, kalendář, služba `wattery.get_plan`, obnova z HA
+  Store, konec platnosti.
 - `<venv>/python tests/ha_core_e2e.py <url> <kód> <sn>` — párování a čtení proti lokálnímu serveru.

@@ -102,11 +102,26 @@
           "error": "Chyba",
           "revoked": "Odpojeno"
         }
+      },
+      "plan": {
+        "name": "Plán baterie",
+        "state": {
+          "charge_grid": "Nabíjení ze sítě",
+          "discharge_grid": "Prodej z baterie",
+          "hold": "Podržet baterii",
+          "no_export": "Bez přetoku",
+          "self_use": "Samospotřeba"
+        }
       }
     },
     "switch": {
       "control": {
         "name": "Řízení z wattery"
+      }
+    },
+    "calendar": {
+      "plan": {
+        "name": "Plán baterie"
       }
     }
   },
@@ -116,6 +131,23 @@
         "tcp": "Modbus TCP",
         "rtu": "RTU přes TCP"
       }
+    }
+  },
+  "services": {
+    "get_plan": {
+      "name": "Plán baterie",
+      "description": "Vrátí plán baterie od wattery po čtvrthodinách (akce, výkon, SOC, ceny) do skriptu nebo automatizace. Jen čtení.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Připojení",
+          "description": "Jen toto připojení wattery (bez výběru všechna)."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "entry_not_loaded": {
+      "message": "Připojení wattery {entry} neexistuje nebo není načtené."
     }
   }
 }

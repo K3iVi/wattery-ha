@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -47,6 +48,8 @@ async def main():
     shutil.copytree(os.path.join(REPO, 'custom_components'), os.path.join(cfg, 'custom_components'))
     hass = HomeAssistant(cfg)
     hass.config.skip_pip = True
+    hass.config.components.add('http')    # kalendář plánu závisí na http (ve skutečném HA běží vždy) — jen atrapa
+    hass.http = SimpleNamespace(register_view=lambda *a, **k: None)
     loader.async_setup(hass)
     await dr.async_load(hass)
     await er.async_load(hass)

@@ -1,6 +1,6 @@
 """Konstanty integrace wattery."""
 DOMAIN = 'wattery'
-VERSION = '0.5.0'
+VERSION = '0.6.0'
 CLIENT_VER = f'ha-int/{VERSION}'
 BACKEND = 'ha-solarman'                   # backend v sync podle připojení (BACKENDS)
 SERVER_URL = 'https://monitoring.wattery.cz'
