@@ -170,6 +170,12 @@ def conflicts():
     check('conflict: solax_modbus sériově → důvod (střídač už čte jiná integrace)',
           'sériově' in (mt.conflict([{'name': 'Dům', 'interface': 'serial'}], '10.0.0.2') or ''))
     check('conflict: bez solax_modbus → None', mt.conflict([], '10.0.0.2') is None)
+    check('conflict_info: kód + jméno + adresa (text skládá flow v jazyce UI)',
+          mt.conflict_info(smb, '192.168.1.50', 502) == {'code': 'same_address', 'name': 'SolaX',
+                                                         'host': '192.168.1.50', 'port': 502}
+          and mt.conflict_info([{'interface': 'core_serial'}], 'x')['code'] == 'core_modbus'
+          and mt.conflict_info([{'interface': 'serial'}], 'x')['code'] == 'serial'
+          and mt.conflict_info(smb, '192.168.1.51') is None)
     check('decode_ascii: netisknutelné → None, nuly = výplň',
           mt.decode_ascii([0x0102]) is None and mt.decode_ascii([0x4834, 0x3300, 0]) == 'H43')
 

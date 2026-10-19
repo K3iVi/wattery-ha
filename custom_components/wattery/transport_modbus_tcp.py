@@ -64,27 +64,40 @@ def decode_ascii(regs) -> str | None:
     return out.strip() or None
 
 
-def conflict(solax_modbus_options: list, host: str, port: int = DEFAULT_PORT) -> str | None:
+def conflict_info(solax_modbus_options: list, host: str, port: int = DEFAULT_PORT) -> dict | None:
     """Překáží spojení na host:port položka integrace homeassistant-solax-modbus? `solax_modbus_options` = options
-    (sloučené s data) jejích config entries. Vrací důvod (pro hlášku ve flow), nebo None.
-      interface 'tcp' se stejným host:port → obsazeno (dongle / převodník pustí jedno spojení)
-      'core_tcp' / 'core' (Modbus jádra HA, adresa je v YAML, ne v položce) → nevíme kam → raději obsazeno
-      'serial' → solax_modbus jede přes vlastní USB převodník; dongle je volný, ale střídač už řídí někdo jiný
+    (sloučené s data) jejích config entries. Vrací {code, name, host, port} (text hlášky skládá flow v jazyce UI),
+    nebo None. code:
+      'same_address' — interface 'tcp' se stejným host:port (dongle / převodník pustí jedno spojení)
+      'core_modbus'  — 'core_tcp' / 'core_serial' / 'core' (Modbus jádra HA, adresa je v YAML) → nevíme kam
+      'serial'       — solax_modbus jede přes vlastní USB převodník; dongle je volný, ale střídač už čte někdo jiný
     Pravidlo §5 (Petr 16. 10.): kdo má solax_modbus, toho čteme z entit a druhé spojení nezakládáme — flow má
     nabídnout „Jen čtení z jiné integrace“; tahle funkce jen hlídá, ať se omylem nepřipojíme na totéž."""
     h = str(host or '').strip().lower()
     for o in solax_modbus_options or ():
         o = o or {}
         iface = str(o.get('interface') or 'tcp')
-        name = o.get('name') or 'SolaX'
+        info = {'name': str(o.get('name') or 'SolaX'), 'host': host, 'port': int(port or DEFAULT_PORT)}
         if iface == 'tcp' and str(o.get('host') or '').strip().lower() == h \
                 and int(o.get('port') or DEFAULT_PORT) == int(port or DEFAULT_PORT):
-            return f'na {host}:{port} je už připojená integrace solax_modbus („{name}“) — dongle pustí jen jedno spojení'
+            return {'code': 'same_address', **info}
         if iface.startswith('core'):
-            return f'integrace solax_modbus („{name}“) jede přes Modbus jádra HA — nevíme, na který převodník'
+            return {'code': 'core_modbus', **info}
         if iface == 'serial':
-            return f'střídač už čte integrace solax_modbus („{name}“, sériově) — použijte čtení z její entit'
+            return {'code': 'serial', **info}
     return None
+
+
+_CONFLICT_CS = {
+    'same_address': 'na {host}:{port} je už připojená integrace solax_modbus („{name}“) — dongle pustí jen jedno spojení',
+    'core_modbus': 'integrace solax_modbus („{name}“) jede přes Modbus jádra HA — nevíme, na který převodník',
+    'serial': 'střídač už čte integrace solax_modbus („{name}“, sériově) — použijte čtení z její entit'}
+
+
+def conflict(solax_modbus_options: list, host: str, port: int = DEFAULT_PORT) -> str | None:
+    """Jako conflict_info, ale česká věta pro hlášku (nebo None)."""
+    c = conflict_info(solax_modbus_options, host, port)
+    return _CONFLICT_CS[c['code']].format(**c) if c else None
 
 
 class ModbusTcp:
