@@ -99,9 +99,13 @@ async def main():
     api.make_post = lambda h, base_url=None: post
 
     res = await hass.config_entries.flow.async_init('wattery', context={'source': 'user'})
+    check('první krok = volba připojení (Solarman, GX; bez jiné integrace bez „entity“)',
+          res['type'] == 'menu' and res['menu_options'] == ['solarman', 'gx'], res)
+    res = await hass.config_entries.flow.async_configure(res['flow_id'], {'next_step_id': 'solarman'})
     ok = await hass.config_entries.flow.async_configure(res['flow_id'], {'code': 'abcd-efgh', 'device': 'dev1'})
     check('spárováno', ok['type'] == 'create_entry' and ok['data']['sn'] == SN, ok)
-    check('párování posílá caps (protokol 2)', (srv.get('pair') or {}).get('caps') == cedge.client_caps(), srv.get('pair'))
+    check('párování posílá caps (protokol 2)', (srv.get('pair') or {}).get('caps') == cedge.client_caps(integrations=('solarman',)),
+          srv.get('pair'))
     await hass.async_block_till_done()
     entry = hass.config_entries.async_entries('wattery')[0]
     ents = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)

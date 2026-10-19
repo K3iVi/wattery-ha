@@ -3,10 +3,39 @@
     "step": {
       "user": {
         "title": "Pair with wattery",
-        "description": "In the wattery app open Settings → Local connection → Pair device and enter the code (valid for 15 minutes). Pick the inverter from the Solarman integration.",
+        "description": "How does Home Assistant read your device? Create the pairing code in the wattery app: Settings → Local connection → Pair device (valid for 15 minutes).",
+        "menu_options": {
+          "solarman": "Deye inverter via the Solarman integration",
+          "gx": "Victron GX (Cerbo) directly on the local network",
+          "entities": "Read only from another integration (e.g. Victron GX)"
+        }
+      },
+      "solarman": {
+        "title": "Deye via Solarman",
+        "description": "Enter the pairing code from the wattery app and pick the inverter from the Solarman integration.",
         "data": {
           "code": "Pairing code",
           "device": "Inverter (Solarman)"
+        }
+      },
+      "gx": {
+        "title": "Victron GX",
+        "description": "MQTT access must be enabled on the GX (GX settings, Services or Integrations section). The password is the one from “Local network security” on the GX (leave empty for the unsecured profile) — it stays in Home Assistant and is never sent to wattery.",
+        "data": {
+          "host": "GX address",
+          "password": "GX password",
+          "code": "Pairing code"
+        },
+        "data_description": {
+          "host": "Default venus.local, or the IP address of the GX on the local network."
+        }
+      },
+      "entities": {
+        "title": "Read from another integration",
+        "description": "wattery will only read values from the entities of an integration you already have — no extra connection to the device, no control.",
+        "data": {
+          "source_entry": "Integration",
+          "code": "Pairing code"
         }
       },
       "reauth_confirm": {
@@ -21,15 +50,21 @@
       "read_failed": "Could not read the serial number from the inverter. Is the Solarman integration working?",
       "cannot_connect": "The wattery server is unreachable. Try again later.",
       "bad_code": "Invalid or expired pairing code.",
-      "sn_mismatch": "This inverter does not belong to the plant the code was issued for.",
+      "sn_mismatch": "This device does not belong to the plant the code was issued for.",
       "unsupported": "This plant type does not support the local connection yet.",
-      "pair_failed": "Pairing failed."
+      "pair_failed": "Pairing failed.",
+      "gx_failed": "Could not connect to the GX. Is the address right and MQTT enabled on the GX?",
+      "gx_auth": "The GX rejected the password.",
+      "gx_cert": "A different device answers at this address than at pairing (different certificate).",
+      "gx_portal": "Could not determine the portal ID from the GX (or there are several GX on the broker).",
+      "no_identity": "Could not identify the device from the entities of the selected integration."
     },
     "abort": {
       "no_solarman": "Install and set up the Solarman integration (ha-solarman) first — it is used to read the inverter.",
-      "already_configured": "This inverter is already paired.",
-      "other_inverter": "The selected inverter differs from the one this entry was paired with.",
-      "reauth_successful": "Paired again."
+      "already_configured": "This device is already paired.",
+      "other_inverter": "The selected device differs from the one this entry was paired with.",
+      "reauth_successful": "Paired again.",
+      "no_sources": "There is no supported integration in Home Assistant to read from."
     }
   },
   "entity": {

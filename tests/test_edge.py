@@ -558,7 +558,7 @@ class FakeGx:
         return {p: self.values[p] for p, _v in pairs}
 
 
-def _mk(sn='SN1', plan=(), transports=None, state=None, regs=None):
+def _mk(sn='SN1', plan=(), transports=None, state=None, regs=None, modbus=True, integrations=()):
     """Klient proti falešnému serveru protokolu 2 (leases, profile, příkazy z fronty)."""
     clock, regs = Clock(), ({} if regs is None else regs)
     e = {'posts': [], 'writes': [], 'reads': [], 'saved': [], 'clock': clock, 'regs': regs,
@@ -585,6 +585,8 @@ def _mk(sn='SN1', plan=(), transports=None, state=None, regs=None):
                'commands': s['cmds'].pop(0) if s['cmds'] else [], 'accepted': len(body['reads'])}
         if s['leases'] is not None:
             res['leases'] = s['leases']() if callable(s['leases']) else s['leases']
+        if s.get('readPlan') is not None:
+            res['readPlan'] = s['readPlan']
         if s['profile'] or s.get('nullProfile'):
             res['profile'] = s['profile']
         if body.get('leaseReport') and s['ack']:
@@ -592,9 +594,10 @@ def _mk(sn='SN1', plan=(), transports=None, state=None, regs=None):
         if body.get('fallbackReport'):
             res['fallbackAck'] = body['fallbackReport']['id']
         return 200, res
-    r = edge.EdgeRunner(read_block=read_block, write_block=write_block, post=post, token='T', read_plan=list(plan),
-                        version='t', backend='f', clock=clock, sn=sn, sleep=sleep, state=state,
-                        on_persist=lambda st: e['saved'].append(json.loads(json.dumps(st))), transports=transports)
+    r = edge.EdgeRunner(read_block=read_block if modbus else None, write_block=write_block if modbus else None,
+                        post=post, token='T', read_plan=list(plan), version='t', backend='f', clock=clock, sn=sn,
+                        sleep=sleep, state=state, on_persist=lambda st: e['saved'].append(json.loads(json.dumps(st))),
+                        transports=transports, integrations=integrations)
     return r, e
 
 
@@ -827,6 +830,54 @@ async def proto2():
           not [x for x in e6['posts'][-1]['reads'] if x.get('type') == 'mqtt'], e6['posts'][-1]['reads'])
 
 
+class FakeEntities:
+    """Přenos ha_entity jako transport_ha_entities.HaEntities (read_item → values + prefix)."""
+
+    def __init__(self, values, prefix=None, domain='victron_gx'):
+        self.values, self.prefix, self.domain = values, prefix, domain
+
+    def read_item(self, it):
+        if (it.get('integration') or self.domain) != self.domain:
+            return None
+        return dict({'values': dict(self.values)}, **({'prefix': self.prefix} if self.prefix else {}))
+
+
+async def transports_a5():
+    print('— přenosy bez Modbusu (A5: GX přímo, entity jiné integrace)')
+    c1 = edge.client_caps(('mqtt',), modbus=False)
+    c2 = edge.client_caps(('ha_entity',), modbus=False, integrations=('victron_gx', 'Zlá-doména', 'victron_gx'))
+    c3 = edge.client_caps(integrations=('solarman',))
+    check('caps: GX bez modbus a bez integrations; entity s doménou (jen platné, bez duplicit); Deye + solarman',
+          c1['transports'] == ['mqtt'] and 'integrations' not in c1 and c2['transports'] == ['ha_entity']
+          and c2['integrations'] == ['victron_gx'] and c3['transports'] == ['modbus']
+          and c3['integrations'] == ['solarman'], (c1, c2, c3))
+    plan = [{'type': 'modbus', 'fc': 3, 'addr': 586, 'count': 3, 'everyS': 30},
+            {'type': 'mqtt', 'name': 'live', 'paths': ['system/0/Dc/Battery/Soc'], 'everyS': 30}]
+    gx = FakeGx()
+    r, e = _mk(sn=gx.portal, plan=plan, transports={'mqtt': gx}, modbus=False)
+    await _step(r, e)
+    body = e['posts'][-1]
+    check('GX: žádné bloky Modbus (ani z plánu), čtení mqtt, caps bez modbus',
+          r.plan == [] and not e['reads'] and [x.get('type') for x in body['reads']] == ['mqtt']
+          and body['client']['caps']['transports'] == ['mqtt'], (r.plan, e['reads'], body))
+    e['srv']['readPlan'] = plan
+    res = await _step(r, e, dt=40, cmds=[cmd('c-a5', fc=3, addr=586, count=3, sn=gx.portal)])
+    check('GX: plán ze sync s blokem modbus → bloky se nečtou; příkaz modbus → bad-command',
+          r.plan == [] and not e['reads'] and res and res[0]['err'] == 'bad-command: přenos modbus není zapojený',
+          (r.plan, e['reads'], res))
+    ents = {'sensor.victron_battery_soc': {'state': '55.5', 'unit': '%', 'uid': 'c0ffee000001_battery_512_battery_soc'}}
+    pl = [{'type': 'ha_entity', 'name': 'victron_gx', 'integration': 'victron_gx', 'everyS': 30},
+          {'type': 'ha_entity', 'name': 'jina', 'integration': 'solax_modbus', 'everyS': 30}]
+    r2, e2 = _mk(sn='c0ffee000001', plan=pl, transports={'ha_entity': FakeEntities(ents, prefix='Hub')},
+                 modbus=False, integrations=('victron_gx',))
+    await _step(r2, e2)
+    b2 = e2['posts'][-1]
+    check('entity: položka své integrace s values a prefix, cizí integrace se neposílá, caps s doménou',
+          [x['name'] for x in b2['reads']] == ['victron_gx'] and b2['reads'][0]['values'] == ents
+          and b2['reads'][0]['prefix'] == 'Hub' and b2['client']['caps'].get('integrations') == ['victron_gx']
+          and b2['client']['caps']['transports'] == ['ha_entity'], b2)
+
+
 def profile_data():
     """Profil zápisu jako data (bez serveru — běží i v CI)."""
     p = edge.PROFILE
@@ -968,6 +1019,7 @@ if __name__ == '__main__':
     asyncio.run(control())
     asyncio.run(fallback())
     asyncio.run(proto2())
+    asyncio.run(transports_a5())
     profile_data()
     parity()
     if a.url:

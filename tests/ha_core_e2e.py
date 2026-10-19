@@ -68,6 +68,7 @@ async def main():
     api.make_post = lambda h, base_url=URL: post
 
     res = await hass.config_entries.flow.async_init('wattery', context={'source': 'user'})
+    res = await hass.config_entries.flow.async_configure(res['flow_id'], {'next_step_id': 'solarman'})
     check('formulář párování', res['type'] == 'form' and res['step_id'] == 'user', res)
     bad = await hass.config_entries.flow.async_configure(res['flow_id'], {'code': 'XXXX-XXXX', 'device': 'dev1'})
     check('špatný kód → chyba bad_code', bad['type'] == 'form' and bad['errors'] == {'base': 'bad_code'}, bad)
@@ -91,6 +92,7 @@ async def main():
     check('server přijal všechny bloky', runner.last_accepted == len(runner.plan), (runner.last_accepted, runner.plan))
 
     dup = await hass.config_entries.flow.async_init('wattery', context={'source': 'user'})
+    dup = await hass.config_entries.flow.async_configure(dup['flow_id'], {'next_step_id': 'solarman'})
     dup2 = await hass.config_entries.flow.async_configure(dup['flow_id'], {'code': CODE, 'device': 'dev1'})
     check('druhé párování téhož střídače → chyba (kód už použitý)', dup2['type'] in ('form', 'abort'), dup2)
 

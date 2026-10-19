@@ -14,7 +14,8 @@ data do wattery — rychleji a spolehlivěji než přes výrobcův cloud.
 2. HACS → tři tečky vpravo nahoře → **Vlastní repozitáře** → `https://github.com/K3iVi/wattery-ha`, typ **Integrace**.
 3. Najděte **wattery** → Stáhnout → restartujte Home Assistant.
 4. V aplikaci wattery: **Nastavení → Lokální spojení → Spárovat zařízení** — zobrazí se kód (platí 15 minut).
-5. V Home Assistantu: **Nastavení → Zařízení a služby → Přidat integraci → wattery** → zadejte kód a vyberte střídač.
+5. V Home Assistantu: **Nastavení → Zařízení a služby → Přidat integraci → wattery** → zvolte, jak se zařízení
+   čte (Deye přes Solarman, Victron GX, nebo jen čtení z jiné integrace — viz 0.5.0), zadejte kód a vyberte zařízení.
 
 Stav spojení ukazuje senzor **Lokální spojení** (Online / Chyba / Odpojeno). Když spojení ve wattery odpojíte,
 Home Assistant nabídne spárovat znovu.
@@ -68,6 +69,21 @@ serveru, co umí (přenosy, vestavěné profily zápisu v `custom_components/wat
 
 Atributy senzoru: `profile` (profil zápisu) a `leases` (pojistky příkazů a do kdy platí).
 
+## Verze 0.5.0 — volba připojení
+
+Při přidání integrace se nejdřív vybírá, jak Home Assistant zařízení čte (jedna položka integrace = jedno připojení):
+
+- **Střídač Deye přes Solarman** — jako dosud (čtení i volitelné řízení). Položky z dřívějších verzí fungují beze změny.
+- **Victron GX (Cerbo) přímo v místní síti** — adresa GX (výchozí `venus.local`) a heslo z „Zabezpečení místní sítě“
+  na GX. Integrace zkusí šifrované spojení (8883) a při nedostupnosti 1883; heslo i adresa zůstávají v Home
+  Assistantu. Při prvním spojení si uloží otisk certifikátu GX — když se na adrese později ozve jiné zařízení,
+  spojení odmítne. Zatím jen čtení; Victron je v pilotním provozu (kód pro Victron vydá wattery, až bude u vaší
+  elektrárny zapnutý).
+- **Jen čtení z jiné integrace** (nabízí se, když máte např. Victron GX v Home Assistantu) — wattery čte hodnoty
+  z entit integrace, kterou už máte. Žádné další spojení na zařízení, žádné řízení (bez přepínače).
+
+Při opakovaném párování stejného zařízení integrace skončí dřív, než kód pošle do wattery.
+
 ---
 
 ## English
@@ -94,6 +110,12 @@ write profiles in `profiles/`), applies a write profile only when the device ide
 (a device the server marks read-only gets no writes at all), keeps short-lived commands alive while wattery extends them (and ends them once if the server is unreachable), and
 reads back what the server specifies. Sensor attributes `profile` and `leases`.
 
+**0.5.0:** adding the integration starts with the connection type: Deye via Solarman (as before; existing entries
+unchanged), Victron GX directly on the local network (GX address, MQTT password from the GX local network security
+setting; TLS 8883 with fallback to 1883, the password and address stay in Home Assistant, the GX certificate
+fingerprint is pinned on first connect; read-only for now, Victron is in pilot), or read-only from the entities of an
+integration you already have (e.g. Victron GX; no extra connection to the device, no control switch).
+
 ## Vývoj
 
 - `python tests/test_edge.py` — testy jádra bez Home Assistantu (čtení, řízení, offline pojistka, shoda profilu se serverem,
@@ -101,4 +123,6 @@ reads back what the server specifies. Sensor attributes `profile` and `leases`.
 - `python tests/server_e2e.py` — klient proti skutečnému serveru deye-monitor v jednom procesu (dočasná DB, bez sítě).
 - `<venv s homeassistant>/python tests/ha_core_control.py` — přepínač, zápis a offline pojistka (HA Store) uvnitř
   Home Assistant core.
+- `<venv>/python tests/ha_core_flow.py` — volba připojení: Victron GX proti simulátoru (1883 i TLS s otiskem),
+  čtení z entit jiné integrace, opakované a nové spárování.
 - `<venv>/python tests/ha_core_e2e.py <url> <kód> <sn>` — párování a čtení proti lokálnímu serveru.

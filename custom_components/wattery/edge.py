@@ -36,6 +36,11 @@ vestavěné profily zápisu, vlastnosti `lease` a `readBack`). Starší server j
   cestou `fallback` (stejná logika, hlášení, uložení i senzor). Pojistka příkazu (Solax VPP): do platnosti klient
   opakuje `refresh.cmds` á `everyS` (i bez spojení se serverem); když platnost uplyne a server se neozývá, provede
   jednou `onExpire` a po obnovení spojení pošle `leaseReport`. Pojistku, která v seznamu chybí, zahodí bez onExpire.
+
+Přenosy (od 0.5.0, A5): jedna položka integrace = jedno připojení — Deye přes ha-solarman (Modbus,
+`transport_solarman`), Victron GX přímo přes MQTT (`transport_mqtt_gx`), nebo jen čtení z entit integrace, kterou
+zákazník už má (`transport_ha_entities`). Položka bez Modbusu (`read_block=None`) ho v `caps` nehlásí a bloky ani
+příkazy modbus neprovádí; `caps.integrations` = domény HA, ze kterých položka čte (žádné identifikátory).
 """
 from __future__ import annotations
 
@@ -44,6 +49,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import time
 from typing import Awaitable, Callable
 
@@ -75,6 +81,7 @@ FALLBACK_SAVE_S = 300         # platnost se posouvá každým sync; ukládat ji 
 PROTO = 2
 FEATURES = ('lease', 'readBack')
 NAMED_TYPES = ('mqtt', 'ha_entity')    # přenosy mimo ha-solarman (zapojuje __init__, jen když jsou nastavené)
+DOMAIN_RE = re.compile(r'^[a-z0-9_]{1,40}$')   # doména integrace HA v caps.integrations (stejně jako server)
 MAX_READS = 16                # položek čtení v jednom sync (strop serveru protokolu 1)
 READS_BUDGET = 48 * 1024      # čtení v jednom sync — strop těla serveru je 64 kB (zbytek na výsledky a hlášení)
 MQTT_MAX_PATHS = 1000         # filtrů v jedné položce plánu / cest v jednom příkazu
@@ -247,10 +254,15 @@ def write_problem(addr, values) -> str | None:
     return _wp.write_problem(PROFILE, addr, values)
 
 
-def client_caps(transports=()) -> dict:
-    """`caps` pro pair i každý sync: Modbus (ha-solarman) + zapojené přenosy, vestavěné profily zápisu, vlastnosti."""
-    return {'proto': PROTO, 'transports': ['modbus'] + [t for t in NAMED_TYPES if t in transports],
+def client_caps(transports=(), modbus=True, integrations=()) -> dict:
+    """`caps` pro pair i každý sync: Modbus (ha-solarman; bez něj jen GX / entity) + zapojené přenosy, vestavěné profily
+    zápisu, vlastnosti a domény integrací HA, ze kterých položka čte (`integrations`, jen názvy domén)."""
+    caps = {'proto': PROTO, 'transports': (['modbus'] if modbus else []) + [t for t in NAMED_TYPES if t in transports],
             'profiles': sorted(PROFILES), 'features': list(FEATURES)}
+    doms = sorted({d for d in integrations or () if isinstance(d, str) and DOMAIN_RE.match(d)})
+    if doms:
+        caps['integrations'] = doms[:16]
+    return caps
 
 
 def _u16_list(v, n) -> bool:
@@ -296,19 +308,20 @@ def station_fallback(lease, sn) -> dict | None:
 class EdgeRunner:
     """Smyčka klienta: přečte bloky, které jsou na řadě, pošle je serveru a provede jeho příkazy."""
 
-    def __init__(self, *, read_block: ReadBlock, post: Post, token: str, read_plan, version: str,
+    def __init__(self, *, read_block: ReadBlock | None, post: Post, token: str, read_plan, version: str,
                  backend: str, next_poll_s=10, on_status: Callable[['EdgeRunner'], None] | None = None,
                  clock: Callable[[], float] = time.time, write_block: WriteBlock | None = None,
                  sn: str | None = None, sleep: Callable[[float], Awaitable] = asyncio.sleep,
                  state: dict | None = None, on_persist: Callable[[dict], None] | None = None,
-                 transports: dict | None = None):
+                 transports: dict | None = None, integrations=()):
+        # read_block None = položka bez Modbusu (GX přes MQTT, entity integrace) → žádné bloky ani příkazy modbus
         self._read_block, self._post, self._token = read_block, post, token
         self._version, self._backend, self._on_status, self._clock = version, backend, on_status, clock
         self._write_block, self._sn, self._sleep = write_block, (str(sn) if sn else None), sleep
         self._on_persist = on_persist
         self._transports = {k: v for k, v in (transports or {}).items() if k in NAMED_TYPES and v is not None}
-        self.caps = client_caps(self._transports)
-        self.plan = clean_plan(read_plan)
+        self.caps = client_caps(self._transports, modbus=read_block is not None, integrations=integrations)
+        self.plan = clean_plan(read_plan) if read_block else []
         self.items = clean_items(read_plan, self._transports)   # položky mqtt / ha_entity
         self._filters_dirty = bool(self.items)
         self.next_poll_s = self._clamp_poll(next_poll_s)
@@ -595,7 +608,7 @@ class EdgeRunner:
             if PROFILES[pid]['transport'] == 'mqtt':
                 tr = self._transports.get('mqtt')
                 ok = bool(tr is not None and self._sn and str(getattr(tr, 'portal', '') or '') == self._sn)
-            elif ident.get('decode') == 'ascii' and self._sn:
+            elif ident.get('decode') == 'ascii' and self._sn and self._read_block:
                 vals = await self._read_block(int(ident.get('fc', 3)), int(ident['addr']), int(ident['count']))
                 ok = decode_sn([int(v) for v in vals]) == self._sn
             else:
@@ -809,6 +822,7 @@ class EdgeRunner:
             self._accept_fallback(res, now)
             del self._pending[:len(sent)]
             plan, items = clean_plan(res.get('readPlan')), clean_items(res.get('readPlan'), self._transports)
+            plan = plan if self._read_block else []
             if plan or items:
                 self._filters_dirty = self._filters_dirty or items != self.items
                 self.plan, self.items = plan, items
@@ -872,6 +886,8 @@ class EdgeRunner:
             return await self._execute_mqtt(cmd, received, refresh)
         if typ != 'modbus':
             return {'ok': False, 'err': 'bad-command: neznámý typ'}
+        if self._read_block is None:
+            return {'ok': False, 'err': 'bad-command: přenos modbus není zapojený'}
         if self._sn and str(cmd.get('sn') or '') != self._sn:
             return {'ok': False, 'err': 'foreign-sn'}
         fc, addr = cmd.get('fc'), cmd.get('addr')

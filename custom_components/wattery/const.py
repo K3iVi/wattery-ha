@@ -1,8 +1,8 @@
 """Konstanty integrace wattery."""
 DOMAIN = 'wattery'
-VERSION = '0.4.0'
+VERSION = '0.5.0'
 CLIENT_VER = f'ha-int/{VERSION}'
-BACKEND = 'ha-solarman'
+BACKEND = 'ha-solarman'                   # backend v sync podle připojení (BACKENDS)
 SERVER_URL = 'https://monitoring.wattery.cz'
 SOLARMAN = 'solarman'                      # integrace ha-solarman (David Rapan), čte střídač
 SN_BLOCK = (3, 3, 5)                       # (fc, adresa, počet) — sériové číslo Deye v ASCII
@@ -14,3 +14,17 @@ CONF_CODE = 'code'
 CONF_READ_PLAN = 'read_plan'
 CONF_STATION = 'station_id'
 CONF_CLIENT = 'client_id'
+
+# Připojení (od 0.5.0): jedna položka integrace = jedno připojení
+CONF_CONN = 'conn'                         # chybí = Deye přes ha-solarman (položky z 0.4 a starších)
+CONN_SOLARMAN, CONN_GX, CONN_ENTITIES = 'solarman', 'gx_mqtt', 'ha_entities'
+BACKENDS = {CONN_SOLARMAN: BACKEND, CONN_GX: 'ha-gx-mqtt', CONN_ENTITIES: 'ha-entities'}
+CONF_HOST = 'host'                         # GX: adresa v místní síti
+CONF_PORT = 'port'
+CONF_TLS = 'tls'
+CONF_PASSWORD = 'password'                 # GX: heslo MQTT (zůstává v HA, na server nejde)
+CONF_CERT = 'cert_sha256'                  # GX: otisk certifikátu z prvního spojení (při změně se klient odpojí)
+CONF_SOURCE = 'source_entry'               # entity: config entry integrace, ze které se čte
+CONF_SOURCE_DOMAIN = 'source_domain'
+GX_HOST_DEFAULT = 'venus.local'
+ENTITY_SOURCES = ('victron_gx',)           # integrace, ze kterých umí server číst entity (Solax až s párováním B)

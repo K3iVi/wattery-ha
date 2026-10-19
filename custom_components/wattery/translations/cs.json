@@ -3,10 +3,39 @@
     "step": {
       "user": {
         "title": "Spárovat s wattery",
-        "description": "V aplikaci wattery otevřete Nastavení → Lokální spojení → Spárovat zařízení a opište kód (platí 15 minut). Vyberte střídač z integrace Solarman.",
+        "description": "Jak Home Assistant čte vaše zařízení? Párovací kód vytvoříte v aplikaci wattery: Nastavení → Lokální spojení → Spárovat zařízení (platí 15 minut).",
+        "menu_options": {
+          "solarman": "Střídač Deye přes integraci Solarman",
+          "gx": "Victron GX (Cerbo) přímo v místní síti",
+          "entities": "Jen čtení z jiné integrace (např. Victron GX)"
+        }
+      },
+      "solarman": {
+        "title": "Deye přes Solarman",
+        "description": "Opište párovací kód z aplikace wattery a vyberte střídač z integrace Solarman.",
         "data": {
           "code": "Párovací kód",
           "device": "Střídač (Solarman)"
+        }
+      },
+      "gx": {
+        "title": "Victron GX",
+        "description": "Na GX musí být zapnutý přístup přes MQTT (nastavení GX, sekce Služby nebo Integrace). Heslo je to z „Zabezpečení místní sítě“ na GX (při profilu bez zabezpečení nechte prázdné) — zůstává v Home Assistantu, do wattery se neposílá.",
+        "data": {
+          "host": "Adresa GX",
+          "password": "Heslo GX",
+          "code": "Párovací kód"
+        },
+        "data_description": {
+          "host": "Výchozí venus.local, nebo IP adresa GX v místní síti."
+        }
+      },
+      "entities": {
+        "title": "Čtení z jiné integrace",
+        "description": "wattery bude jen číst hodnoty z entit integrace, kterou už máte — žádné další spojení na zařízení, žádné řízení.",
+        "data": {
+          "source_entry": "Integrace",
+          "code": "Párovací kód"
         }
       },
       "reauth_confirm": {
@@ -21,15 +50,21 @@
       "read_failed": "Ze střídače se nepodařilo přečíst sériové číslo. Funguje integrace Solarman?",
       "cannot_connect": "Server wattery je nedostupný. Zkuste to za chvíli.",
       "bad_code": "Neplatný nebo prošlý párovací kód.",
-      "sn_mismatch": "Tento střídač nepatří k elektrárně, pro kterou byl kód vystaven.",
+      "sn_mismatch": "Toto zařízení nepatří k elektrárně, pro kterou byl kód vystaven.",
       "unsupported": "Tenhle typ elektrárny zatím lokální spojení nepodporuje.",
-      "pair_failed": "Párování se nepovedlo."
+      "pair_failed": "Párování se nepovedlo.",
+      "gx_failed": "GX se nepodařilo připojit. Je adresa správná a MQTT na GX zapnuté?",
+      "gx_auth": "GX odmítl heslo.",
+      "gx_cert": "Na adrese odpovídá jiné zařízení než při párování (jiný certifikát).",
+      "gx_portal": "Z GX se nepodařilo zjistit portal ID (nebo je na brokeru víc GX).",
+      "no_identity": "Z entit vybrané integrace se nepodařilo poznat zařízení."
     },
     "abort": {
       "no_solarman": "Nejdřív nainstalujte a nastavte integraci Solarman (ha-solarman) — přes ni se čte střídač.",
-      "already_configured": "Tento střídač už je spárovaný.",
-      "other_inverter": "Vybraný střídač je jiný než ten, se kterým byla integrace spárovaná.",
-      "reauth_successful": "Spárováno znovu."
+      "already_configured": "Toto zařízení už je spárované.",
+      "other_inverter": "Vybrané zařízení je jiné než to, se kterým byla integrace spárovaná.",
+      "reauth_successful": "Spárováno znovu.",
+      "no_sources": "V Home Assistantu není žádná podporovaná integrace, ze které by šlo číst."
     }
   },
   "entity": {
