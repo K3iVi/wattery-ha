@@ -172,10 +172,25 @@ async def modbus_tcp(hass, flow, srv, cf):
     await hass.config_entries.async_add(ext)
     bad = await form()
     bad = await flow.async_configure(bad['flow_id'], inp(port=1502))
-    check('Modbus TCP: solax_modbus na stejné adrese → mb_conflict s důvodem, bez spojení',
-          bad['type'] == 'form' and bad['errors'] == {'base': 'mb_conflict'}
-          and '127.0.0.1:1502' in bad['description_placeholders']['reason'] and sim.connections == c1, bad)
+    check('Modbus TCP: solax_modbus na stejné adrese → mb_conflict_same_address se jménem a adresou, bez spojení',
+          bad['type'] == 'form' and bad['errors'] == {'base': 'mb_conflict_same_address'}
+          and bad['description_placeholders'] == {'name': 'Dongle', 'host': '127.0.0.1', 'port': '1502'}
+          and sim.connections == c1, bad)
     await hass.config_entries.async_remove(ext.entry_id)
+    ser = ConfigEntry(data={'name': 'USB', 'interface': 'serial'}, domain='solax_modbus', title='USB', source='user',
+                      version=1, minor_version=1, options={}, unique_id=None, discovery_keys=MappingProxyType({}),
+                      subentries_data=None)
+    await hass.config_entries.async_add(ser)
+    bad = await form()
+    bad = await flow.async_configure(bad['flow_id'], inp(port=1502))
+    check('Modbus TCP: solax_modbus sériově → mb_conflict_serial, bez spojení',
+          bad.get('errors') == {'base': 'mb_conflict_serial'} and sim.connections == c1, bad)
+    await hass.config_entries.async_remove(ser.entry_id)
+    tr = {lang: json.load(open(os.path.join(REPO, 'custom_components', 'wattery', 'translations', f'{lang}.json'),
+                               encoding='utf-8'))['config']['error'] for lang in ('cs', 'en')}
+    check('překlady: chyby konfliktu pro všechny kódy conflict_info v cs i en se {name}',
+          all(f'mb_conflict_{c}' in tr[lang] and '{name}' in tr[lang][f'mb_conflict_{c}']
+              for lang in tr for c in ('same_address', 'core_modbus', 'serial')), tr)
 
     check('Modbus TCP: unload bez chyby', await hass.config_entries.async_unload(entry.entry_id))
     check('Modbus TCP: po unload spojení na dongle zavřené', await until(lambda: sim._active == 0, 3), sim._active)

@@ -27,7 +27,7 @@ from .const import (CONF_CERT, CONF_CLIENT, CONF_CODE, CONF_CONN, CONF_DEVICE, C
 from .edge import client_caps
 from .transport_ha_entities import SERVER_BINDS, HaEntities
 from .transport_modbus_tcp import DEFAULT_PORT as MODBUS_PORT
-from .transport_modbus_tcp import DEFAULT_UNIT, FRAMINGS, conflict, probe
+from .transport_modbus_tcp import DEFAULT_UNIT, FRAMINGS, conflict_info, probe
 from .transport_mqtt_gx import PORT_PLAIN, PORT_TLS, GxAuthError, GxCertError, GxError, GxMqtt
 from .transport_solarman import read_sn, solarman_ready
 
@@ -172,7 +172,7 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_modbus_tcp(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict = {}
-        reason = ''
+        ph = {'name': '', 'host': '', 'port': ''}
         if user_input is not None:
             data = {CONF_HOST: user_input[CONF_HOST].strip(), CONF_PORT: int(user_input[CONF_PORT]),
                     CONF_UNIT: int(user_input[CONF_UNIT]), CONF_FRAMING: user_input[CONF_FRAMING]}
@@ -180,9 +180,10 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
             self._async_abort_entries_match({k: data[k] for k in (CONF_HOST, CONF_PORT, CONF_UNIT)})
             opts = [dict(e.data, **e.options) for e in self.hass.config_entries.async_entries(SOLAX_MODBUS)
                     if not e.disabled_by]
-            reason = conflict(opts, data[CONF_HOST], data[CONF_PORT]) or ''
-            if reason:          # dongle pustí jedno spojení — druhé by shodilo solax_modbus (§5: čtení z entit)
-                errors = {'base': 'mb_conflict'}
+            clash = conflict_info(opts, data[CONF_HOST], data[CONF_PORT])
+            if clash:           # dongle pustí jedno spojení — druhé by shodilo solax_modbus (§5: čtení z entit)
+                errors = {'base': f'mb_conflict_{clash["code"]}'}
+                ph = {k: str(clash[k]) for k in ph}
             else:
                 rec, errors = await self._pair(CONN_MODBUS_TCP, data, user_input[CONF_CODE])
                 if rec:
@@ -199,7 +200,7 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_CODE): selector.TextSelector(),
         })
         return self.async_show_form(step_id='modbus_tcp', data_schema=schema, errors=errors,
-                                    description_placeholders={'reason': reason})
+                                    description_placeholders=ph)
 
     async def async_step_entities(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         sources = {e.entry_id: e for e in self._entity_sources()}
