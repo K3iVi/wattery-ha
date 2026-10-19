@@ -9,7 +9,7 @@ Vlastní asyncio klient bez závislostí (pymodbus by se pral s verzí, kterou s
     po `reconnect_s` — žádné bušení do donglu
   • výjimka 6 (zaneprázdněn) → jednou zopakovat po krátké pauze
   • dongle pustí JEDNO spojení: když spojení hned po připojení zavře, je obsazený (homeassistant-solax-modbus,
-    aplikace výrobce…) → `DongleBusy`; proto se tam, kde už je solax_modbus, nepřipojujeme (`conflict`)
+    aplikace výrobce…) → `DongleBusy`; proto se tam, kde už je solax_modbus, nepřipojujeme (`conflict_info`)
 Zápis jde jen tak, jak ho pošle server a pustí profil zápisu v `edge.py` (tady se nic nekontroluje navíc).
 """
 from __future__ import annotations
@@ -86,18 +86,6 @@ def conflict_info(solax_modbus_options: list, host: str, port: int = DEFAULT_POR
         if iface == 'serial':
             return {'code': 'serial', **info}
     return None
-
-
-_CONFLICT_CS = {
-    'same_address': 'na {host}:{port} je už připojená integrace solax_modbus („{name}“) — dongle pustí jen jedno spojení',
-    'core_modbus': 'integrace solax_modbus („{name}“) jede přes Modbus jádra HA — nevíme, na který převodník',
-    'serial': 'střídač už čte integrace solax_modbus („{name}“, sériově) — použijte čtení z její entit'}
-
-
-def conflict(solax_modbus_options: list, host: str, port: int = DEFAULT_PORT) -> str | None:
-    """Jako conflict_info, ale česká věta pro hlášku (nebo None)."""
-    c = conflict_info(solax_modbus_options, host, port)
-    return _CONFLICT_CS[c['code']].format(**c) if c else None
 
 
 class ModbusTcp:

@@ -3,7 +3,7 @@
 
 Rozhraní přenosu (read_block / write_block / identity) v obou rámováních, výjimky Modbus, zaneprázdněný dongle,
 obsazený dongle (jedno spojení), špatná jednotka, zpožděná odpověď (stará tid se zahodí), souběh dotazů,
-čekání před novým spojením, `probe` pro config flow a `conflict` proti položkám solax_modbus. Když je vedle repa
+čekání před novým spojením, `probe` pro config flow a `conflict_info` proti položkám solax_modbus. Když je vedle repa
 deye-monitor, jede i se simulátorem střídače SolaxSim a s plánem čtení adaptéru serveru.
 """
 import asyncio
@@ -161,21 +161,19 @@ async def failures():
 
 def conflicts():
     smb = [{'name': 'SolaX', 'interface': 'tcp', 'host': '192.168.1.50', 'port': 502}]
-    check('conflict: stejný host:port jako solax_modbus → důvod', 'jedno spojení' in
-          (mt.conflict(smb, '192.168.1.50', 502) or ''))
-    check('conflict: jiný host → None', mt.conflict(smb, '192.168.1.51', 502) is None)
-    check('conflict: jiný port na stejném převodníku → None', mt.conflict(smb, '192.168.1.50', 8899) is None)
-    check('conflict: solax_modbus přes Modbus jádra HA → důvod (nevíme kam)',
-          mt.conflict([{'interface': 'core_tcp'}], '10.0.0.2') is not None)
-    check('conflict: solax_modbus sériově → důvod (střídač už čte jiná integrace)',
-          'sériově' in (mt.conflict([{'name': 'Dům', 'interface': 'serial'}], '10.0.0.2') or ''))
-    check('conflict: bez solax_modbus → None', mt.conflict([], '10.0.0.2') is None)
-    check('conflict_info: kód + jméno + adresa (text skládá flow v jazyce UI)',
-          mt.conflict_info(smb, '192.168.1.50', 502) == {'code': 'same_address', 'name': 'SolaX',
-                                                         'host': '192.168.1.50', 'port': 502}
-          and mt.conflict_info([{'interface': 'core_serial'}], 'x')['code'] == 'core_modbus'
-          and mt.conflict_info([{'interface': 'serial'}], 'x')['code'] == 'serial'
-          and mt.conflict_info(smb, '192.168.1.51') is None)
+    ci = mt.conflict_info
+    check('conflict_info: stejný host:port jako solax_modbus → same_address + jméno + adresa',
+          ci(smb, '192.168.1.50', 502) == {'code': 'same_address', 'name': 'SolaX', 'host': '192.168.1.50',
+                                           'port': 502})
+    check('conflict_info: jiný host → None', ci(smb, '192.168.1.51', 502) is None)
+    check('conflict_info: jiný port na stejném převodníku → None', ci(smb, '192.168.1.50', 8899) is None)
+    check('conflict_info: solax_modbus přes Modbus jádra HA → core_modbus (nevíme kam)',
+          ci([{'interface': 'core_tcp'}], '10.0.0.2')['code'] == 'core_modbus'
+          and ci([{'interface': 'core_serial'}], 'x')['code'] == 'core_modbus')
+    check('conflict_info: solax_modbus sériově → serial (střídač už čte jiná integrace)',
+          ci([{'name': 'Dům', 'interface': 'serial'}], '10.0.0.2') == {'code': 'serial', 'name': 'Dům',
+                                                                      'host': '10.0.0.2', 'port': 502})
+    check('conflict_info: bez solax_modbus → None', ci([], '10.0.0.2') is None)
     check('decode_ascii: netisknutelné → None, nuly = výplň',
           mt.decode_ascii([0x0102]) is None and mt.decode_ascii([0x4834, 0x3300, 0]) == 'H43')
 
