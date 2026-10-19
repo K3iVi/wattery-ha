@@ -45,6 +45,14 @@ class GxError(Exception):
     pass
 
 
+class GxAuthError(GxError):
+    """GX odmítl přihlášení MQTT (heslo / přístup) — jiný port nepomůže."""
+
+
+class GxCertError(GxError):
+    """Certifikát GX se liší od uloženého otisku, nebo při TLS žádný nepřišel — spojení odmítnuto."""
+
+
 def _vlen(n: int) -> bytes:
     out = bytearray()
     while True:
@@ -119,9 +127,11 @@ class GxMqtt:
         return ctx
 
     def _check_pin(self, der: bytes):
+        if not der:                                  # bez certifikátu by se uložil otisk prázdna
+            raise GxCertError('GX při TLS neposlal certifikát — spojení odmítnuto')
         fp = cert_fingerprint(der)
         if self.cert_sha256 and fp != self.cert_sha256:
-            raise GxError('certifikát GX se změnil (jiné zařízení v síti?) — spojení odmítnuto')
+            raise GxCertError('certifikát GX se změnil (jiné zařízení v síti?) — spojení odmítnuto')
         self.cert_sha256 = fp
 
     async def start(self):
@@ -146,7 +156,9 @@ class GxMqtt:
         if t != 0x20 or len(body) < 2:
             raise GxError('GX neodpověděl na přihlášení MQTT')
         if body[1] != 0:
-            raise GxError({4: 'GX odmítl heslo', 5: 'GX: přístup nepovolen'}.get(body[1], f'GX odmítl spojení ({body[1]})'))
+            if body[1] in (4, 5):
+                raise GxAuthError({4: 'GX odmítl heslo', 5: 'GX: přístup nepovolen'}[body[1]])
+            raise GxError(f'GX odmítl spojení ({body[1]})')
         self.connected = True
         if not self.portal:
             await self._discover()

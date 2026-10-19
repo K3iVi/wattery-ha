@@ -48,7 +48,7 @@ async def scenario():
             await bad.start()
             check('špatné heslo → chyba', False)
         except gx.GxError as e:
-            check('špatné heslo → chyba „GX odmítl heslo“', 'heslo' in str(e), e)
+            check('špatné heslo → GxAuthError „GX odmítl heslo“', 'heslo' in str(e) and isinstance(e, gx.GxAuthError), e)
         await bad.close()
 
         t = [1000.0]
@@ -132,6 +132,17 @@ def pin():
     except gx.GxError:
         changed = True
     check('otisk certifikátu: první spojení uloží, změna = odmítnout', ok and changed)
+    c3 = gx.GxMqtt('h', tls=True)
+    try:
+        c3._check_pin(b'')
+        empty = False
+    except gx.GxCertError:
+        empty = c3.cert_sha256 is None
+    check('TLS bez certifikátu → GxCertError, otisk se neuloží', empty)
+    try:
+        c2._check_pin(b'cert-B')
+    except gx.GxError as e:
+        check('změna certifikátu = GxCertError (podtřída GxError)', isinstance(e, gx.GxCertError), type(e))
 
 
 async def tls():
