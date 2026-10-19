@@ -3,6 +3,9 @@
 - Deye přes Solarman: zařízení ha-solarman, identita = SN přečtené ze střídače.
 - Victron GX přímo: adresa GX v místní síti (+ heslo MQTT, zůstává v HA); zkusí TLS 8883, pak 1883. Identita =
   portal ID z GX, otisk certifikátu se uloží (při změně se klient odpojí).
+- Solax přes LAN dongle / převodník (Modbus TCP): adresa, port, jednotka, rámování; identita = SN ze střídače
+  (holding 0x0000). Dongle pustí jediné spojení → tam, kde už je solax_modbus na stejné adrese (nebo přes jádro HA
+  / sériově), se nepřipojujeme a nabídne se čtení z jejích entit.
 - Jen čtení z jiné integrace: položka integrace, kterou zákazník už má (ENTITY_SOURCES); identita z unique_id jejích
   entit (victron_gx), nebo ji určí server (solax_modbus — G4 SN v entitách nemá; server spáruje jen k jedinému
   zařízení té značky na elektrárně). Žádné druhé spojení na zařízení, žádné řízení.
@@ -17,18 +20,23 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.helpers import selector
 
 from . import api
-from .const import (CONF_CERT, CONF_CLIENT, CONF_CODE, CONF_CONN, CONF_DEVICE, CONF_HOST, CONF_PASSWORD, CONF_PORT,
-                    CONF_READ_PLAN, CONF_SN, CONF_SOURCE, CONF_SOURCE_DOMAIN, CONF_STATION, CONF_TLS, CONF_TOKEN,
-                    CONN_ENTITIES, CONN_GX, CONN_SOLARMAN, DOMAIN, ENTITY_SOURCES, GX_HOST_DEFAULT, SOLARMAN)
+from .const import (CONF_CERT, CONF_CLIENT, CONF_CODE, CONF_CONN, CONF_DEVICE, CONF_FRAMING, CONF_HOST, CONF_PASSWORD,
+                    CONF_PORT, CONF_READ_PLAN, CONF_SN, CONF_SOURCE, CONF_SOURCE_DOMAIN, CONF_STATION, CONF_TLS,
+                    CONF_TOKEN, CONF_UNIT, CONN_ENTITIES, CONN_GX, CONN_MODBUS_TCP, CONN_SOLARMAN, DOMAIN,
+                    ENTITY_SOURCES, GX_HOST_DEFAULT, SOLARMAN, SOLAX_MODBUS)
 from .edge import client_caps
 from .transport_ha_entities import SERVER_BINDS, HaEntities
+from .transport_modbus_tcp import DEFAULT_PORT as MODBUS_PORT
+from .transport_modbus_tcp import DEFAULT_UNIT, FRAMINGS, conflict, probe
 from .transport_mqtt_gx import PORT_PLAIN, PORT_TLS, GxAuthError, GxCertError, GxError, GxMqtt
 from .transport_solarman import read_sn, solarman_ready
 
 _LOGGER = logging.getLogger(__name__)
 _PAIR_ERRORS = {'bad-code': 'bad_code', 'sn-mismatch': 'sn_mismatch', 'unsupported': 'unsupported',
                 'client-unsupported': 'unsupported'}
-_TITLES = {CONN_SOLARMAN: 'wattery – střídač {sn}', CONN_GX: 'wattery – Victron GX', CONN_ENTITIES: 'wattery – {src}'}
+_TITLES = {CONN_SOLARMAN: 'wattery – střídač {sn}', CONN_GX: 'wattery – Victron GX', CONN_ENTITIES: 'wattery – {src}',
+           CONN_MODBUS_TCP: 'wattery – střídač {sn}'}
+_MB_ERRORS = {'connect': 'mb_connect', 'busy': 'mb_busy', 'timeout': 'mb_timeout', 'identity': 'mb_identity'}
 
 
 async def gx_probe(host: str, password: str, port: int | None = None, tls: bool | None = None,
@@ -86,6 +94,12 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
                     'gx_portal' if 'portal' in str(e) else 'gx_failed')
                 return None, {'base': err}
             return found, {}
+        if conn == CONN_MODBUS_TCP:
+            res = await probe(data[CONF_HOST], data[CONF_PORT], data[CONF_UNIT], data[CONF_FRAMING])
+            if not res.get('ok'):
+                _LOGGER.warning('wattery: Modbus TCP %s:%s: %s', data[CONF_HOST], data[CONF_PORT], res.get('error'))
+                return None, {'base': _MB_ERRORS.get(res.get('reason'), 'mb_failed')}
+            return {CONF_SN: res['sn']}, {}
         src = HaEntities(self.hass, data[CONF_SOURCE_DOMAIN], data[CONF_SOURCE])
         ident = src.identity()
         if not ident and data[CONF_SOURCE_DOMAIN] in SERVER_BINDS:
@@ -97,6 +111,8 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
             return client_caps(('mqtt',), modbus=False)
         if conn == CONN_ENTITIES:
             return client_caps(('ha_entity',), modbus=False, integrations=(data[CONF_SOURCE_DOMAIN],))
+        if conn == CONN_MODBUS_TCP:
+            return client_caps()
         return client_caps(integrations=(SOLARMAN,))
 
     async def _pair(self, conn: str, data: dict, code: str, new: bool = True) -> tuple[dict | None, dict]:
@@ -118,7 +134,7 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
         return [e for d in ENTITY_SOURCES for e in self.hass.config_entries.async_entries(d) if not e.disabled_by]
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        opts = ['solarman', 'gx']
+        opts = ['solarman', 'gx', 'modbus_tcp']
         if self._entity_sources():
             opts.append('entities')
         return self.async_show_menu(step_id='user', menu_options=opts)
@@ -154,6 +170,37 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
         })
         return self.async_show_form(step_id='gx', data_schema=schema, errors=errors)
 
+    async def async_step_modbus_tcp(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict = {}
+        reason = ''
+        if user_input is not None:
+            data = {CONF_HOST: user_input[CONF_HOST].strip(), CONF_PORT: int(user_input[CONF_PORT]),
+                    CONF_UNIT: int(user_input[CONF_UNIT]), CONF_FRAMING: user_input[CONF_FRAMING]}
+            # Už spárovaný dongle drží naše spojení (pustí jen jedno) → probe by hlásil „obsazeno“; skončit dřív.
+            self._async_abort_entries_match({k: data[k] for k in (CONF_HOST, CONF_PORT, CONF_UNIT)})
+            opts = [dict(e.data, **e.options) for e in self.hass.config_entries.async_entries(SOLAX_MODBUS)
+                    if not e.disabled_by]
+            reason = conflict(opts, data[CONF_HOST], data[CONF_PORT]) or ''
+            if reason:          # dongle pustí jedno spojení — druhé by shodilo solax_modbus (§5: čtení z entit)
+                errors = {'base': 'mb_conflict'}
+            else:
+                rec, errors = await self._pair(CONN_MODBUS_TCP, data, user_input[CONF_CODE])
+                if rec:
+                    return self._finish(CONN_MODBUS_TCP, rec)
+        d = user_input or {}
+        schema = vol.Schema({
+            vol.Required(CONF_HOST, default=d.get(CONF_HOST, '')): selector.TextSelector(),
+            vol.Required(CONF_PORT, default=d.get(CONF_PORT, MODBUS_PORT)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=65535, mode=selector.NumberSelectorMode.BOX)),
+            vol.Required(CONF_UNIT, default=d.get(CONF_UNIT, DEFAULT_UNIT)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=247, mode=selector.NumberSelectorMode.BOX)),
+            vol.Required(CONF_FRAMING, default=d.get(CONF_FRAMING, FRAMINGS[0])): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=list(FRAMINGS), translation_key='framing')),
+            vol.Required(CONF_CODE): selector.TextSelector(),
+        })
+        return self.async_show_form(step_id='modbus_tcp', data_schema=schema, errors=errors,
+                                    description_placeholders={'reason': reason})
+
     async def async_step_entities(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         sources = {e.entry_id: e for e in self._entity_sources()}
         if not sources:
@@ -184,7 +231,7 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
             conn = entry.data.get(CONF_CONN) or CONN_SOLARMAN
             keep = {k: v for k, v in entry.data.items() if k in (CONF_DEVICE, CONF_HOST, CONF_PASSWORD, CONF_PORT,
                                                                    CONF_TLS, CONF_CERT, CONF_SOURCE,
-                                                                   CONF_SOURCE_DOMAIN)}
+                                                                   CONF_SOURCE_DOMAIN, CONF_UNIT, CONF_FRAMING)}
             rec, errors = await self._pair(conn, keep, user_input[CONF_CODE], new=False)
             if rec:
                 if rec[CONF_SN] != entry.data.get(CONF_SN):

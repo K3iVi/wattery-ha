@@ -4,7 +4,8 @@ Zkouší: menu (Solarman / GX / entity jen když je podporovaná integrace), Vic
 (tests/gx_sim.py: 8883 nedostupné → 1883, špatné heslo, portal ID, heslo nejde na server, caps bez modbus, čtení
 mqtt do sync, nové spárování), jen čtení z entit integrace victron_gx (zástupná integrace v testu: identita
 z unique_id, jen platné entity sensor/number, bez přepínače řízení, víc GX v jedné integraci → chyba), jen čtení
-z entit solax_modbus (identitu vrátí server, jen entity s klíči z plánu, prefix hubu, opakování → konec před serverem).
+z entit solax_modbus (identitu vrátí server, jen entity s klíči z plánu, prefix hubu, opakování → konec před serverem),
+Solax přes LAN dongle Modbus TCP (tests/solax_dongle_sim.py: obsazeno, jiná jednotka, SN, čtení, souběh se solax_modbus).
 Portal ID a hodnoty jsou smyšlené (veřejné repo)."""
 import asyncio
 import json
@@ -19,6 +20,7 @@ from types import MappingProxyType
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, 'tests'))
 import gx_sim  # noqa: E402
+import solax_dongle_sim  # noqa: E402
 
 from homeassistant import loader  # noqa: E402
 from homeassistant.config_entries import ConfigEntries, ConfigEntry  # noqa: E402
@@ -101,6 +103,85 @@ async def gx_tls(cf):
         await bp.stop()
 
 
+async def modbus_tcp(hass, flow, srv, cf):
+    """Solax přes LAN dongle (Modbus TCP) proti simulátoru donglu: výchozí hodnoty formuláře, obsazený dongle,
+    špatná jednotka (mlčí → časový limit), spárování s SN ze střídače, čtení bloků přes dongle do sync, druhé
+    přidání téže adresy, souběh se solax_modbus na stejné adrese (nepřipojit se), unload zavře spojení."""
+    sim = await solax_dongle_sim.DongleSim().start()
+    n0 = len(srv['pairs'])
+
+    async def form():
+        r = await flow.async_init('wattery', context={'source': 'user'})
+        return await flow.async_configure(r['flow_id'], {'next_step_id': 'modbus_tcp'})
+
+    def inp(**kw):
+        return dict({'host': '127.0.0.1', 'port': sim.port, 'unit': 1, 'framing': 'tcp', 'code': 'abcd-efgh'}, **kw)
+
+    res = await form()
+    dflt = {str(k): k.default() for k in res['data_schema'].schema if callable(getattr(k, 'default', None))}
+    check('Modbus TCP: formulář, výchozí port 502, jednotka 1, rámování tcp', res['type'] == 'form'
+          and res['step_id'] == 'modbus_tcp' and dflt.get('port') == 502 and dflt.get('unit') == 1
+          and dflt.get('framing') == 'tcp', (res, dflt))
+
+    _r, w = await asyncio.open_connection('127.0.0.1', sim.port)     # dongle drží „aplikace výrobce“
+    await until(lambda: sim._active == 1, 2)
+    bad = await flow.async_configure(res['flow_id'], inp())
+    check('Modbus TCP: dongle obsazený jiným klientem → mb_busy, nic se nepárovalo', bad['type'] == 'form'
+          and bad['errors'] == {'base': 'mb_busy'} and len(srv['pairs']) == n0, bad)
+    w.close()
+    await until(lambda: sim._active == 0, 2)
+
+    bad = await flow.async_configure(res['flow_id'], inp(unit=7))
+    check('Modbus TCP: jiná jednotka (sběrnice mlčí) → mb_timeout', bad['type'] == 'form'
+          and bad['errors'] == {'base': 'mb_timeout'} and len(srv['pairs']) == n0, bad)
+    bad = await flow.async_configure(res['flow_id'], inp(port=free_port()))
+    check('Modbus TCP: nic neposlouchá → mb_connect', bad['type'] == 'form'
+          and bad['errors'] == {'base': 'mb_connect'}, bad)
+
+    ok = await flow.async_configure(res['flow_id'], inp())
+    d = ok.get('data') or {}
+    pb = srv['pairs'][-1] if len(srv['pairs']) > n0 else {}
+    check('Modbus TCP: spárováno, SN ze střídače (holding 0), data host/port/unit/framing',
+          ok['type'] == 'create_entry' and d.get('conn') == 'modbus_tcp' and d.get('sn') == solax_dongle_sim.SN
+          and ok['title'] == f'wattery – střídač {solax_dongle_sim.SN}' and d.get('host') == '127.0.0.1'
+          and d.get('port') == sim.port and d.get('unit') == 1 and d.get('framing') == 'tcp', ok)
+    check('Modbus TCP: párování sn ze střídače, caps modbus bez integrací, adresa na server nejde',
+          pb.get('sn') == solax_dongle_sim.SN and pb.get('caps', {}).get('transports') == ['modbus']
+          and 'integrations' not in pb.get('caps', {}) and '127.0.0.1' not in json.dumps(pb), pb)
+    await hass.async_block_till_done()
+    entry = next(e for e in hass.config_entries.async_entries('wattery') if e.data.get('conn') == 'modbus_tcp')
+    tok = entry.data['token']
+
+    def mb_reads():
+        return [r for t, body in srv['bodies'] if t == tok for r in body['reads'] if r.get('fc') == 4]
+    await until(mb_reads, 10)
+    rd = (mb_reads() or [{}])[-1]
+    check('Modbus TCP: čtení bloku input 0×16 přes dongle do sync (napětí 0x02 = 2400), backend ha-modbus-tcp',
+          rd.get('addr') == 0 and len(rd.get('values') or []) == 16 and rd['values'][2] == 2400
+          and any(b['client']['backend'] == 'ha-modbus-tcp' for t, b in srv['bodies'] if t == tok), rd)
+
+    n1, c1 = len(srv['pairs']), sim.connections
+    dup = await form()
+    dup = await flow.async_configure(dup['flow_id'], inp())
+    check('Modbus TCP podruhé na stejný dongle → already_configured bez spojení a bez serveru',
+          dup.get('reason') == 'already_configured' and len(srv['pairs']) == n1 and sim.connections == c1, dup)
+
+    ext = ConfigEntry(data={'name': 'Dongle', 'interface': 'tcp', 'host': '127.0.0.1', 'port': 1502},
+                      domain='solax_modbus', title='Dongle', source='user', version=1, minor_version=1, options={},
+                      unique_id=None, discovery_keys=MappingProxyType({}), subentries_data=None)
+    await hass.config_entries.async_add(ext)
+    bad = await form()
+    bad = await flow.async_configure(bad['flow_id'], inp(port=1502))
+    check('Modbus TCP: solax_modbus na stejné adrese → mb_conflict s důvodem, bez spojení',
+          bad['type'] == 'form' and bad['errors'] == {'base': 'mb_conflict'}
+          and '127.0.0.1:1502' in bad['description_placeholders']['reason'] and sim.connections == c1, bad)
+    await hass.config_entries.async_remove(ext.entry_id)
+
+    check('Modbus TCP: unload bez chyby', await hass.config_entries.async_unload(entry.entry_id))
+    check('Modbus TCP: po unload spojení na dongle zavřené', await until(lambda: sim._active == 0, 3), sim._active)
+    await sim.stop()
+
+
 async def main():
     cfg = tempfile.mkdtemp(prefix='ha-flow-')
     shutil.copytree(os.path.join(REPO, 'custom_components'), os.path.join(cfg, 'custom_components'))
@@ -124,7 +205,8 @@ async def main():
     plans = {'mqtt': [{'type': 'mqtt', 'name': 'live', 'paths': ['system/0/Dc/Battery/Soc'], 'everyS': 1}],
              'ha_entity': [{'type': 'ha_entity', 'name': 'victron_gx', 'integration': 'victron_gx', 'everyS': 1}],
              'solax_modbus': [{'type': 'ha_entity', 'name': 'solax_modbus', 'integration': 'solax_modbus',
-                               'keys': ['battery_capacity', 'pv_power_1', 'run_mode'], 'everyS': 1}]}
+                               'keys': ['battery_capacity', 'pv_power_1', 'run_mode'], 'everyS': 1}],
+             'modbus': [{'type': 'modbus', 'name': 'live', 'fc': 4, 'addr': 0, 'count': 16, 'everyS': 5}]}
 
     async def post(path, body, token=None):
         if path == cedge.PAIR_PATH:
@@ -139,8 +221,8 @@ async def main():
 
     flow = hass.config_entries.flow
     res = await flow.async_init('wattery', context={'source': 'user'})
-    check('menu bez podporované integrace: Solarman, GX', res['type'] == 'menu'
-          and res['menu_options'] == ['solarman', 'gx'], res)
+    check('menu bez podporované integrace: Solarman, GX, Modbus TCP', res['type'] == 'menu'
+          and res['menu_options'] == ['solarman', 'gx', 'modbus_tcp'], res)
     res = await flow.async_configure(res['flow_id'], {'next_step_id': 'solarman'})
     check('Deye bez ha-solarman → abort no_solarman', res['type'] == 'abort' and res['reason'] == 'no_solarman', res)
 
@@ -226,7 +308,7 @@ async def main():
 
     res = await flow.async_init('wattery', context={'source': 'user'})
     check('menu s integrací victron_gx nabízí i čtení z entit', res['type'] == 'menu'
-          and res['menu_options'] == ['solarman', 'gx', 'entities'], res)
+          and res['menu_options'] == ['solarman', 'gx', 'modbus_tcp', 'entities'], res)
     res = await flow.async_configure(res['flow_id'], {'next_step_id': 'entities'})
     sel = next((k for k in res.get('data_schema', {}).schema if str(k) == 'source_entry'), None)
     opts = res['data_schema'].schema[sel].config['options'] if sel else []
@@ -292,6 +374,7 @@ async def main():
     check('Solax z entit podruhé → already_configured dřív, než se kód pošle serveru',
           dup.get('reason') == 'already_configured' and len(srv['pairs']) == n0 + 1, dup)
     check('Solax z entit: unload bez chyby', await hass.config_entries.async_unload(sx_entry.entry_id))
+    await modbus_tcp(hass, flow, srv, cf)
     await hass.async_stop()
     print('VŠE OK' if not FAILS else f'SELHALO: {", ".join(FAILS)}')
     return 1 if FAILS else 0

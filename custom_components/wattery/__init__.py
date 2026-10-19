@@ -25,12 +25,13 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.storage import Store
 
 from . import api
-from .const import (BACKENDS, CLIENT_VER, CONF_CERT, CONF_CONN, CONF_DEVICE, CONF_HOST, CONF_PASSWORD, CONF_PORT,
-                    CONF_READ_PLAN, CONF_SN, CONF_SOURCE, CONF_SOURCE_DOMAIN, CONF_TLS, CONF_TOKEN, CONN_ENTITIES,
-                    CONN_GX, CONN_SOLARMAN, DOMAIN, SOLARMAN, VERSION)
+from .const import (BACKENDS, CLIENT_VER, CONF_CERT, CONF_CONN, CONF_DEVICE, CONF_FRAMING, CONF_HOST, CONF_PASSWORD,
+                    CONF_PORT, CONF_READ_PLAN, CONF_SN, CONF_SOURCE, CONF_SOURCE_DOMAIN, CONF_TLS, CONF_TOKEN,
+                    CONF_UNIT, CONN_ENTITIES, CONN_GX, CONN_MODBUS_TCP, CONN_SOLARMAN, DOMAIN, SOLARMAN, VERSION)
 from .edge import EdgeRunner, Revoked
 from .transport_ha_entities import HaEntities, hub_prefix
 from .transport_mqtt_gx import GxMqtt
+from .transport_modbus_tcp import ModbusTcp
 from .transport_solarman import SolarmanModbus
 
 _LOGGER = logging.getLogger(__name__)
@@ -105,6 +106,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: WatteryConfigEntry) -> b
         read_block, write_block, integrations = dev.read_block, dev.write_block, (SOLARMAN,)
     elif conn == CONN_GX:
         gx = transports['mqtt'] = gx_client(data)
+    elif conn == CONN_MODBUS_TCP:
+        mb = ModbusTcp(data[CONF_HOST], data[CONF_PORT], data[CONF_UNIT], data[CONF_FRAMING])
+        read_block, write_block = mb.read_block, mb.write_block
+        entry.async_on_unload(mb.close)
     elif conn == CONN_ENTITIES:
         src = hass.config_entries.async_get_entry(data[CONF_SOURCE])
         transports['ha_entity'] = HaEntities(hass, data[CONF_SOURCE_DOMAIN], data[CONF_SOURCE],

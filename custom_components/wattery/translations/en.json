@@ -7,6 +7,7 @@
         "menu_options": {
           "solarman": "Deye inverter via the Solarman integration",
           "gx": "Victron GX (Cerbo) directly on the local network",
+          "modbus_tcp": "Solax inverter via LAN dongle or converter (Modbus TCP)",
           "entities": "Read only from another integration (Victron GX, SolaX Modbus)"
         }
       },
@@ -28,6 +29,22 @@
         },
         "data_description": {
           "host": "Default venus.local, or the IP address of the GX on the local network."
+        }
+      },
+      "modbus_tcp": {
+        "title": "Solax via Modbus TCP",
+        "description": "Address of the LAN dongle (Pocket WiFi 3.0) or an RS485 → Ethernet converter at the inverter. The dongle accepts a single connection: if the SolaX Modbus integration already reads the inverter, choose “Read-only from another integration” instead.",
+        "data": {
+          "host": "Dongle / converter address",
+          "port": "Port",
+          "unit": "Unit address",
+          "framing": "Framing",
+          "code": "Pairing code"
+        },
+        "data_description": {
+          "host": "IP address in your local network.",
+          "unit": "Modbus address of the inverter, usually 1.",
+          "framing": "Solax dongle: Modbus TCP. Converter in “transparent” mode: RTU over TCP."
         }
       },
       "entities": {
@@ -57,7 +74,13 @@
       "gx_auth": "The GX rejected the password.",
       "gx_cert": "A different device answers at this address than at pairing (different certificate).",
       "gx_portal": "Could not determine the portal ID from the GX (or there are several GX on the broker).",
-      "no_identity": "Could not identify the device from the entities of the selected integration."
+      "no_identity": "Could not identify the device from the entities of the selected integration.",
+      "mb_conflict": "Another integration already connects to the inverter: {reason}.",
+      "mb_connect": "Could not connect to the dongle. Are the address and port correct?",
+      "mb_busy": "The dongle is busy with another program (integration or vendor app). It accepts a single connection.",
+      "mb_timeout": "The inverter does not respond. Check the unit address and framing.",
+      "mb_identity": "The reply is not a Solax inverter serial number (another device?).",
+      "mb_failed": "Reading from the inverter failed (invalid reply). Check the framing."
     },
     "abort": {
       "no_solarman": "Install and set up the Solarman integration (ha-solarman) first — it is used to read the inverter.",
@@ -82,6 +105,14 @@
     "switch": {
       "control": {
         "name": "Control from wattery"
+      }
+    }
+  },
+  "selector": {
+    "framing": {
+      "options": {
+        "tcp": "Modbus TCP",
+        "rtu": "RTU over TCP"
       }
     }
   }

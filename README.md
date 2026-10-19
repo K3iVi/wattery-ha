@@ -15,7 +15,7 @@ data do wattery — rychleji a spolehlivěji než přes výrobcův cloud.
 3. Najděte **wattery** → Stáhnout → restartujte Home Assistant.
 4. V aplikaci wattery: **Nastavení → Lokální spojení → Spárovat zařízení** — zobrazí se kód (platí 15 minut).
 5. V Home Assistantu: **Nastavení → Zařízení a služby → Přidat integraci → wattery** → zvolte, jak se zařízení
-   čte (Deye přes Solarman, Victron GX, nebo jen čtení z jiné integrace — viz 0.5.0), zadejte kód a vyberte zařízení.
+   čte (Deye přes Solarman, Victron GX, Solax přes LAN dongle, nebo jen čtení z jiné integrace — viz 0.5.0), zadejte kód a vyberte zařízení.
 
 Stav spojení ukazuje senzor **Lokální spojení** (Online / Chyba / Odpojeno). Když spojení ve wattery odpojíte,
 Home Assistant nabídne spárovat znovu.
@@ -79,6 +79,11 @@ Při přidání integrace se nejdřív vybírá, jak Home Assistant zařízení 
   Assistantu. Při prvním spojení si uloží otisk certifikátu GX — když se na adrese později ozve jiné zařízení,
   spojení odmítne. Zatím jen čtení; Victron je v pilotním provozu (kód pro Victron vydá wattery, až bude u vaší
   elektrárny zapnutý).
+- **Střídač Solax přes LAN dongle nebo převodník (Modbus TCP)** — adresa donglu (Pocket WiFi 3.0 / LAN) nebo
+  převodníku RS485 → Ethernet, port (502), adresa jednotky (1) a rámování (Modbus TCP, u převodníku v režimu
+  „transparent“ RTU přes TCP). Sériové číslo se přečte ze střídače. Dongle pustí jen jedno spojení: když už máte
+  integraci SolaX Modbus na stejné adrese (nebo přes Modbus jádra HA či sériově), integrace se nepřipojí a nabídne
+  čtení z jejích entit. Řízení přepínačem až po zapnutí řízení Solaxu u vaší elektrárny ve wattery.
 - **Jen čtení z jiné integrace** (nabízí se, když máte v Home Assistantu Victron GX nebo SolaX Modbus) — wattery
   čte hodnoty z entit integrace, kterou už máte. Žádné další spojení na zařízení (dongle Solaxu pustí jen jedno),
   žádné řízení (bez přepínače). U Solaxu G4 entity sériové číslo nenesou — wattery integraci spáruje se střídačem
@@ -115,7 +120,10 @@ reads back what the server specifies. Sensor attributes `profile` and `leases`.
 **0.5.0:** adding the integration starts with the connection type: Deye via Solarman (as before; existing entries
 unchanged), Victron GX directly on the local network (GX address, MQTT password from the GX local network security
 setting; TLS 8883 with fallback to 1883, the password and address stay in Home Assistant, the GX certificate
-fingerprint is pinned on first connect; read-only for now, Victron is in pilot), or read-only from the entities of an
+fingerprint is pinned on first connect; read-only for now, Victron is in pilot), a Solax inverter via a LAN dongle
+or an RS485 → Ethernet converter (Modbus TCP or RTU over TCP; the serial number is read from the inverter; the dongle
+accepts a single connection, so the integration refuses an address the SolaX Modbus integration already uses and
+offers its entities instead), or read-only from the entities of an
 integration you already have (Victron GX or SolaX Modbus; no extra connection to the device, no control switch; a
 Solax G4 has no serial number in its entities, so wattery pairs it only with a plant that has a single Solax).
 
@@ -127,5 +135,6 @@ Solax G4 has no serial number in its entities, so wattery pairs it only with a p
 - `<venv s homeassistant>/python tests/ha_core_control.py` — přepínač, zápis a offline pojistka (HA Store) uvnitř
   Home Assistant core.
 - `<venv>/python tests/ha_core_flow.py` — volba připojení: Victron GX proti simulátoru (1883 i TLS s otiskem),
-  čtení z entit jiné integrace, opakované a nové spárování.
+  čtení z entit jiné integrace, Solax přes LAN dongle proti simulátoru (`tests/solax_dongle_sim.py`: obsazený
+  dongle, jiná jednotka, souběh se SolaX Modbus), opakované a nové spárování.
 - `<venv>/python tests/ha_core_e2e.py <url> <kód> <sn>` — párování a čtení proti lokálnímu serveru.

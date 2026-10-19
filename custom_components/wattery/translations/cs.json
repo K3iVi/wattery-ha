@@ -7,6 +7,7 @@
         "menu_options": {
           "solarman": "Střídač Deye přes integraci Solarman",
           "gx": "Victron GX (Cerbo) přímo v místní síti",
+          "modbus_tcp": "Střídač Solax přes LAN dongle nebo převodník (Modbus TCP)",
           "entities": "Jen čtení z jiné integrace (Victron GX, SolaX Modbus)"
         }
       },
@@ -28,6 +29,22 @@
         },
         "data_description": {
           "host": "Výchozí venus.local, nebo IP adresa GX v místní síti."
+        }
+      },
+      "modbus_tcp": {
+        "title": "Solax přes Modbus TCP",
+        "description": "Adresa LAN donglu (Pocket WiFi 3.0) nebo převodníku RS485 → Ethernet u střídače. Dongle pustí jen jedno spojení: když střídač už čte integrace SolaX Modbus, zvolte místo toho „Jen čtení z jiné integrace“.",
+        "data": {
+          "host": "Adresa donglu / převodníku",
+          "port": "Port",
+          "unit": "Adresa jednotky",
+          "framing": "Rámování",
+          "code": "Párovací kód"
+        },
+        "data_description": {
+          "host": "IP adresa v místní síti.",
+          "unit": "Modbus adresa střídače, obvykle 1.",
+          "framing": "Dongle Solax: Modbus TCP. Převodník v režimu „transparent“: RTU přes TCP."
         }
       },
       "entities": {
@@ -57,7 +74,13 @@
       "gx_auth": "GX odmítl heslo.",
       "gx_cert": "Na adrese odpovídá jiné zařízení než při párování (jiný certifikát).",
       "gx_portal": "Z GX se nepodařilo zjistit portal ID (nebo je na brokeru víc GX).",
-      "no_identity": "Z entit vybrané integrace se nepodařilo poznat zařízení."
+      "no_identity": "Z entit vybrané integrace se nepodařilo poznat zařízení.",
+      "mb_conflict": "Na střídač se už připojuje jiná integrace: {reason}.",
+      "mb_connect": "K donglu se nepodařilo připojit. Je adresa a port správně?",
+      "mb_busy": "Dongle je obsazený jiným programem (integrace nebo aplikace výrobce). Dongle pustí jen jedno spojení.",
+      "mb_timeout": "Střídač neodpovídá. Zkontrolujte adresu jednotky a rámování.",
+      "mb_identity": "Odpověď není sériové číslo střídače Solax (jiné zařízení?).",
+      "mb_failed": "Čtení ze střídače se nepovedlo (chybná odpověď). Zkontrolujte rámování."
     },
     "abort": {
       "no_solarman": "Nejdřív nainstalujte a nastavte integraci Solarman (ha-solarman) — přes ni se čte střídač.",
@@ -82,6 +105,14 @@
     "switch": {
       "control": {
         "name": "Řízení z wattery"
+      }
+    }
+  },
+  "selector": {
+    "framing": {
+      "options": {
+        "tcp": "Modbus TCP",
+        "rtu": "RTU přes TCP"
       }
     }
   }

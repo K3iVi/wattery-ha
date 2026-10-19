@@ -99,8 +99,8 @@ async def main():
     api.make_post = lambda h, base_url=None: post
 
     res = await hass.config_entries.flow.async_init('wattery', context={'source': 'user'})
-    check('první krok = volba připojení (Solarman, GX; bez jiné integrace bez „entity“)',
-          res['type'] == 'menu' and res['menu_options'] == ['solarman', 'gx'], res)
+    check('první krok = volba připojení (Solarman, GX, Modbus TCP; bez jiné integrace bez „entity“)',
+          res['type'] == 'menu' and res['menu_options'] == ['solarman', 'gx', 'modbus_tcp'], res)
     res = await hass.config_entries.flow.async_configure(res['flow_id'], {'next_step_id': 'solarman'})
     ok = await hass.config_entries.flow.async_configure(res['flow_id'], {'code': 'abcd-efgh', 'device': 'dev1'})
     check('spárováno', ok['type'] == 'create_entry' and ok['data']['sn'] == SN, ok)

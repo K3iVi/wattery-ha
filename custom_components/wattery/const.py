@@ -17,8 +17,9 @@ CONF_CLIENT = 'client_id'
 
 # Připojení (od 0.5.0): jedna položka integrace = jedno připojení
 CONF_CONN = 'conn'                         # chybí = Deye přes ha-solarman (položky z 0.4 a starších)
-CONN_SOLARMAN, CONN_GX, CONN_ENTITIES = 'solarman', 'gx_mqtt', 'ha_entities'
-BACKENDS = {CONN_SOLARMAN: BACKEND, CONN_GX: 'ha-gx-mqtt', CONN_ENTITIES: 'ha-entities'}
+CONN_SOLARMAN, CONN_GX, CONN_ENTITIES, CONN_MODBUS_TCP = 'solarman', 'gx_mqtt', 'ha_entities', 'modbus_tcp'
+BACKENDS = {CONN_SOLARMAN: BACKEND, CONN_GX: 'ha-gx-mqtt', CONN_ENTITIES: 'ha-entities',
+            CONN_MODBUS_TCP: 'ha-modbus-tcp'}
 CONF_HOST = 'host'                         # GX: adresa v místní síti
 CONF_PORT = 'port'
 CONF_TLS = 'tls'
@@ -27,4 +28,7 @@ CONF_CERT = 'cert_sha256'                  # GX: otisk certifikátu z prvního s
 CONF_SOURCE = 'source_entry'               # entity: config entry integrace, ze které se čte
 CONF_SOURCE_DOMAIN = 'source_domain'
 GX_HOST_DEFAULT = 'venus.local'
+CONF_UNIT = 'unit'                         # Modbus TCP: adresa jednotky za donglem / převodníkem
+CONF_FRAMING = 'framing'                   # Modbus TCP: 'tcp' (MBAP) | 'rtu' (RTU přes TCP)
+SOLAX_MODBUS = 'solax_modbus'
 ENTITY_SOURCES = ('victron_gx', 'solax_modbus')   # integrace, ze kterých umí server číst entity
