@@ -4,7 +4,8 @@
 - Victron GX přímo: adresa GX v místní síti (+ heslo MQTT, zůstává v HA); zkusí TLS 8883, pak 1883. Identita =
   portal ID z GX, otisk certifikátu se uloží (při změně se klient odpojí).
 - Jen čtení z jiné integrace: položka integrace, kterou zákazník už má (ENTITY_SOURCES); identita z unique_id jejích
-  entit. Žádné druhé spojení na zařízení, žádné řízení.
+  entit (victron_gx), nebo ji určí server (solax_modbus — G4 SN v entitách nemá; server spáruje jen k jedinému
+  zařízení té značky na elektrárně). Žádné druhé spojení na zařízení, žádné řízení.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from .const import (CONF_CERT, CONF_CLIENT, CONF_CODE, CONF_CONN, CONF_DEVICE, C
                     CONF_READ_PLAN, CONF_SN, CONF_SOURCE, CONF_SOURCE_DOMAIN, CONF_STATION, CONF_TLS, CONF_TOKEN,
                     CONN_ENTITIES, CONN_GX, CONN_SOLARMAN, DOMAIN, ENTITY_SOURCES, GX_HOST_DEFAULT, SOLARMAN)
 from .edge import client_caps
-from .transport_ha_entities import HaEntities
+from .transport_ha_entities import SERVER_BINDS, HaEntities
 from .transport_mqtt_gx import PORT_PLAIN, PORT_TLS, GxError, GxMqtt
 from .transport_solarman import read_sn, solarman_ready
 
@@ -68,7 +69,7 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
         if code_http != 200 or not res.get('token'):
             _LOGGER.warning('wattery: párování odmítnuto (%s): %s', code_http, res)
             return None, {'base': _PAIR_ERRORS.get(res.get('error'), 'pair_failed')}
-        return {CONF_TOKEN: res['token'], CONF_SN: ident, CONF_STATION: res.get('stationId'),
+        return {CONF_TOKEN: res['token'], CONF_SN: str(res.get('sn') or ident), CONF_STATION: res.get('stationId'),
                 CONF_CLIENT: res.get('clientId'), CONF_READ_PLAN: res.get('readPlan') or []}, {}
 
     async def _identity(self, conn: str, data: dict) -> tuple[dict | None, dict]:
@@ -92,6 +93,8 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
             return found, {}
         src = HaEntities(self.hass, data[CONF_SOURCE_DOMAIN], data[CONF_SOURCE])
         ident = src.identity()
+        if not ident and data[CONF_SOURCE_DOMAIN] in SERVER_BINDS:
+            return {CONF_SN: ''}, {}                     # identitu vrátí server v odpovědi na párování
         return ({CONF_SN: ident}, {}) if ident else (None, {'base': 'no_identity'})
 
     def _caps(self, conn: str, data: dict) -> dict:
@@ -107,7 +110,7 @@ class WatteryConfigFlow(ConfigFlow, domain=DOMAIN):
             return None, errors
         rec = dict(data, **found)
         if new:      # už spárované zařízení → konec dřív, než server spotřebuje kód a založí dalšího klienta
-            await self.async_set_unique_id(rec[CONF_SN])
+            await self.async_set_unique_id(rec[CONF_SN] or f'{data[CONF_SOURCE_DOMAIN]}-{data[CONF_SOURCE]}')
             self._abort_if_unique_id_configured()
         res, errors = await self._server_pair(code, rec[CONF_SN], self._caps(conn, rec))
         return (dict(rec, **res, **{CONF_CONN: conn}) if res else None), errors

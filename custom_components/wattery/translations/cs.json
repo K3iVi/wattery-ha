@@ -7,7 +7,7 @@
         "menu_options": {
           "solarman": "Střídač Deye přes integraci Solarman",
           "gx": "Victron GX (Cerbo) přímo v místní síti",
-          "entities": "Jen čtení z jiné integrace (např. Victron GX)"
+          "entities": "Jen čtení z jiné integrace (Victron GX, SolaX Modbus)"
         }
       },
       "solarman": {

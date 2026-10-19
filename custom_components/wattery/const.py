@@ -27,4 +27,4 @@ CONF_CERT = 'cert_sha256'                  # GX: otisk certifikátu z prvního s
 CONF_SOURCE = 'source_entry'               # entity: config entry integrace, ze které se čte
 CONF_SOURCE_DOMAIN = 'source_domain'
 GX_HOST_DEFAULT = 'venus.local'
-ENTITY_SOURCES = ('victron_gx',)           # integrace, ze kterých umí server číst entity (Solax až s párováním B)
+ENTITY_SOURCES = ('victron_gx', 'solax_modbus')   # integrace, ze kterých umí server číst entity

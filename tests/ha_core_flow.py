@@ -3,7 +3,8 @@
 Zkouší: menu (Solarman / GX / entity jen když je podporovaná integrace), Victron GX přímo proti simulátoru GX
 (tests/gx_sim.py: 8883 nedostupné → 1883, špatné heslo, portal ID, heslo nejde na server, caps bez modbus, čtení
 mqtt do sync, nové spárování), jen čtení z entit integrace victron_gx (zástupná integrace v testu: identita
-z unique_id, jen platné entity sensor/number, bez přepínače řízení, víc GX v jedné integraci → chyba).
+z unique_id, jen platné entity sensor/number, bez přepínače řízení, víc GX v jedné integraci → chyba), jen čtení
+z entit solax_modbus (identitu vrátí server, jen entity s klíči z plánu, prefix hubu, opakování → konec před serverem).
 Portal ID a hodnoty jsou smyšlené (veřejné repo)."""
 import asyncio
 import json
@@ -104,6 +105,7 @@ async def main():
     cfg = tempfile.mkdtemp(prefix='ha-flow-')
     shutil.copytree(os.path.join(REPO, 'custom_components'), os.path.join(cfg, 'custom_components'))
     stub_integration(cfg, 'victron_gx')
+    stub_integration(cfg, 'solax_modbus')
     hass = HomeAssistant(cfg)
     hass.config.skip_pip = True
     loader.async_setup(hass)
@@ -120,14 +122,17 @@ async def main():
     cedge.POLL_MIN_S, cedge.RETRY_FAILED_READ_S = 0.2, 0.3          # rychlé kolo jen v testu
     srv = {'pairs': [], 'bodies': []}
     plans = {'mqtt': [{'type': 'mqtt', 'name': 'live', 'paths': ['system/0/Dc/Battery/Soc'], 'everyS': 1}],
-             'ha_entity': [{'type': 'ha_entity', 'name': 'victron_gx', 'integration': 'victron_gx', 'everyS': 1}]}
+             'ha_entity': [{'type': 'ha_entity', 'name': 'victron_gx', 'integration': 'victron_gx', 'everyS': 1}],
+             'solax_modbus': [{'type': 'ha_entity', 'name': 'solax_modbus', 'integration': 'solax_modbus',
+                               'keys': ['battery_capacity', 'pv_power_1', 'run_mode'], 'everyS': 1}]}
 
     async def post(path, body, token=None):
         if path == cedge.PAIR_PATH:
             srv['pairs'].append(body)
-            tr = body['caps']['transports']
+            tr, integ = body['caps']['transports'], body['caps'].get('integrations') or []
+            plan = plans['solax_modbus'] if 'solax_modbus' in integ else plans.get(tr[0], [])
             return 200, {'ok': True, 'token': f'TOK{len(srv["pairs"])}', 'clientId': len(srv['pairs']),
-                         'stationId': 1001, 'readPlan': plans.get(tr[0], []), 'nextPollS': 10}
+                         'stationId': 1001, 'readPlan': plan, 'nextPollS': 10, 'sn': body['sn'] or 'H3TEST0000001'}
         srv['bodies'].append((token, body))
         return 200, {'ok': True, 'nextPollS': 0.3, 'accepted': len(body['reads']), 'serverTime': time.time()}
     api.make_post = lambda h, base_url=None: post
@@ -254,6 +259,39 @@ async def main():
               'sensor.victron_grid_forward': {'state': '12.25', 'unit': 'kWh',
                                               'uid': f'{PORTAL2}_grid_30_grid_energy_forward'}}, rd)
     check('entity: unload bez chyby', await hass.config_entries.async_unload(ent_entry.entry_id))
+
+    # ── jen čtení z entit solax_modbus (G4: SN v entitách není → identitu vrátí server) ──
+    sx = ConfigEntry(data={'name': 'SolaX'}, domain='solax_modbus', title='SolaX', source='user', version=1,
+                     minor_version=1, options={}, unique_id=None, discovery_keys=MappingProxyType({}),
+                     subentries_data=None)
+    await hass.config_entries.async_add(sx)
+    for key, val, unit in (('battery_capacity', '81', '%'), ('pv_power_1', '1200', 'W'),
+                           ('inverter_temperature', '40', '°C'), ('run_mode', 'Normal Mode', None)):
+        reg.async_get_or_create('sensor', 'solax_modbus', f'SolaX_{key}', config_entry=sx,
+                                suggested_object_id=f'solax_{key}')
+        hass.states.async_set(f'sensor.solax_{key}', val, {'unit_of_measurement': unit} if unit else {})
+    n0 = len(srv['pairs'])
+    res = await flow.async_init('wattery', context={'source': 'user'})
+    res = await flow.async_configure(res['flow_id'], {'next_step_id': 'entities'})
+    ok = await flow.async_configure(res['flow_id'], {'source_entry': sx.entry_id, 'code': 'abcd-efgh'})
+    pb = srv['pairs'][-1]
+    check('Solax z entit: párování bez identity (sn ""), SN ze serveru, caps ha_entity + solax_modbus',
+          ok['type'] == 'create_entry' and ok['data']['sn'] == 'H3TEST0000001' and pb['sn'] == ''
+          and pb['caps'].get('integrations') == ['solax_modbus'] and len(srv['pairs']) == n0 + 1, (ok, pb))
+    await hass.async_block_till_done()
+    sx_entry = next(e for e in hass.config_entries.async_entries('wattery') if e.data.get('source_entry') == sx.entry_id)
+    tok = sx_entry.data['token']
+    await until(ha_reads, 10)
+    rd = (ha_reads() or [{}])[-1]
+    check('Solax z entit: jen entity s klíči z plánu (teplota ne), prefix hubu',
+          set(rd.get('values') or {}) == {'sensor.solax_battery_capacity', 'sensor.solax_pv_power_1',
+                                          'sensor.solax_run_mode'} and rd.get('prefix') == 'SolaX', rd)
+    dup = await flow.async_init('wattery', context={'source': 'user'})
+    dup = await flow.async_configure(dup['flow_id'], {'next_step_id': 'entities'})
+    dup = await flow.async_configure(dup['flow_id'], {'source_entry': sx.entry_id, 'code': 'abcd-efgh'})
+    check('Solax z entit podruhé → already_configured dřív, než se kód pošle serveru',
+          dup.get('reason') == 'already_configured' and len(srv['pairs']) == n0 + 1, dup)
+    check('Solax z entit: unload bez chyby', await hass.config_entries.async_unload(sx_entry.entry_id))
     await hass.async_stop()
     print('VŠE OK' if not FAILS else f'SELHALO: {", ".join(FAILS)}')
     return 1 if FAILS else 0

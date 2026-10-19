@@ -85,6 +85,7 @@ DOMAIN_RE = re.compile(r'^[a-z0-9_]{1,40}$')   # doména integrace HA v caps.int
 MAX_READS = 16                # položek čtení v jednom sync (strop serveru protokolu 1)
 READS_BUDGET = 48 * 1024      # čtení v jednom sync — strop těla serveru je 64 kB (zbytek na výsledky a hlášení)
 MQTT_MAX_PATHS = 1000         # filtrů v jedné položce plánu / cest v jednom příkazu
+HA_MAX_KEYS = 500             # klíčů v položce ha_entity (stejně jako strop entit na serveru)
 LEASE_MAX = 4                 # pojistek najednou (stejně jako server)
 LEASE_MAX_CMDS = 6            # příkazů v onExpire / refresh jedné pojistky
 REFRESH_MIN_S = 30            # obnova příkazu nejčastěji á 30 s, ať server pošle cokoli
@@ -153,6 +154,9 @@ def clean_items(plan, transports=()) -> list:
             it.update({k: b[k] for k in ('dev', 'base') if _short_str(b.get(k), 120)})
         else:
             it.update({k: b[k] for k in ('integration', 'prefix') if _short_str(b.get(k), 60)})
+            keys = b.get('keys')        # klíče, které adaptér bere (solax_modbus má ~390 entit — celé se nevejdou)
+            if isinstance(keys, list) and 0 < len(keys) <= HA_MAX_KEYS and all(_short_str(k, 60) for k in keys):
+                it['keys'] = list(keys)
         out.append(it)
     return out
 

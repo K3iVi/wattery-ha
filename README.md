@@ -79,8 +79,10 @@ Při přidání integrace se nejdřív vybírá, jak Home Assistant zařízení 
   Assistantu. Při prvním spojení si uloží otisk certifikátu GX — když se na adrese později ozve jiné zařízení,
   spojení odmítne. Zatím jen čtení; Victron je v pilotním provozu (kód pro Victron vydá wattery, až bude u vaší
   elektrárny zapnutý).
-- **Jen čtení z jiné integrace** (nabízí se, když máte např. Victron GX v Home Assistantu) — wattery čte hodnoty
-  z entit integrace, kterou už máte. Žádné další spojení na zařízení, žádné řízení (bez přepínače).
+- **Jen čtení z jiné integrace** (nabízí se, když máte v Home Assistantu Victron GX nebo SolaX Modbus) — wattery
+  čte hodnoty z entit integrace, kterou už máte. Žádné další spojení na zařízení (dongle Solaxu pustí jen jedno),
+  žádné řízení (bez přepínače). U Solaxu G4 entity sériové číslo nenesou — wattery integraci spáruje se střídačem
+  elektrárny, jen když je na ní jediný Solax.
 
 Při opakovaném párování stejného zařízení integrace skončí dřív, než kód pošle do wattery.
 
@@ -114,7 +116,8 @@ reads back what the server specifies. Sensor attributes `profile` and `leases`.
 unchanged), Victron GX directly on the local network (GX address, MQTT password from the GX local network security
 setting; TLS 8883 with fallback to 1883, the password and address stay in Home Assistant, the GX certificate
 fingerprint is pinned on first connect; read-only for now, Victron is in pilot), or read-only from the entities of an
-integration you already have (e.g. Victron GX; no extra connection to the device, no control switch).
+integration you already have (Victron GX or SolaX Modbus; no extra connection to the device, no control switch; a
+Solax G4 has no serial number in its entities, so wattery pairs it only with a plant that has a single Solax).
 
 ## Vývoj
 

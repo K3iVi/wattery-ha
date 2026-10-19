@@ -7,7 +7,7 @@
         "menu_options": {
           "solarman": "Deye inverter via the Solarman integration",
           "gx": "Victron GX (Cerbo) directly on the local network",
-          "entities": "Read only from another integration (e.g. Victron GX)"
+          "entities": "Read only from another integration (Victron GX, SolaX Modbus)"
         }
       },
       "solarman": {

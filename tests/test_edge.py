@@ -865,6 +865,12 @@ async def transports_a5():
     check('GX: plán ze sync s blokem modbus → bloky se nečtou; příkaz modbus → bad-command',
           r.plan == [] and not e['reads'] and res and res[0]['err'] == 'bad-command: přenos modbus není zapojený',
           (r.plan, e['reads'], res))
+    ki = edge.clean_items([{'type': 'ha_entity', 'name': 'sx', 'integration': 'solax_modbus', 'everyS': 30,
+                            'keys': ['battery_capacity', 'run_mode']},
+                           {'type': 'ha_entity', 'name': 'zle', 'integration': 'solax_modbus', 'everyS': 30,
+                            'keys': [1, 2]}], {'ha_entity': object()})
+    check('clean_items: ha_entity si nechá keys (jen seznam krátkých textů)',
+          ki[0].get('keys') == ['battery_capacity', 'run_mode'] and 'keys' not in ki[1], ki)
     ents = {'sensor.victron_battery_soc': {'state': '55.5', 'unit': '%', 'uid': 'c0ffee000001_battery_512_battery_soc'}}
     pl = [{'type': 'ha_entity', 'name': 'victron_gx', 'integration': 'victron_gx', 'everyS': 30},
           {'type': 'ha_entity', 'name': 'jina', 'integration': 'solax_modbus', 'everyS': 30}]

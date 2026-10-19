@@ -4,8 +4,9 @@
 integrace. Klient je hloupý: pošle entity zvolené položky (config entry) té integrace, mapování na klíče dělá
 adaptér na serveru (`edge_victron.ha_entities_to_values`, `edge_solax.decode_ha_entities`).
 
-Položka plánu `{type: 'ha_entity', name, integration, everyS}` → `{values: {entity_id: {state, unit, uid}}, prefix?}`
-(uid = unique_id z registru entit — entity_id si uživatel může přejmenovat, unique_id ne).
+Položka plánu `{type: 'ha_entity', name, integration, keys?, everyS}` → `{values: {entity_id: {state, unit, uid}},
+prefix?}` (uid = unique_id z registru entit — entity_id si uživatel může přejmenovat, unique_id ne). S `keys` jen
+entity, jejichž unique_id je „<prefix>_<klíč>“ (bez prefixu „…_<klíč>“) — solax_modbus má pro G4 ~390 entit.
 """
 from __future__ import annotations
 
@@ -24,6 +25,16 @@ MAX_ENTITIES = 500             # stejně jako server (HA_MAX_ENTITIES)
 MAX_BYTES = 44 * 1024          # položka se musí vejít pod strop jednoho sync (edge.READS_BUDGET 48 kB)
 _PREFIX_KEY = {'solax_modbus': 'name'}   # název hubu v nastavení integrace = začátek unique_id jejích entit
 _VICTRON_PORTAL = re.compile(r'^([0-9a-f]{12})_')
+SERVER_BINDS = ('solax_modbus',)  # identitu v entitách nemají (G4 bez SN) → server spáruje k jedinému zařízení
+
+
+def key_match(uid: str, keys, prefix=None) -> bool:
+    """unique_id entity × klíče z plánu (bez rozlišení velikosti písmen)."""
+    u = str(uid or '').lower()
+    if prefix:
+        p = str(prefix).lower().rstrip('_') + '_'
+        return u.startswith(p) and u[len(p):] in keys
+    return any(u == k or u.endswith('_' + k) for k in keys)
 
 
 def hub_prefix(entry) -> str | None:
@@ -47,9 +58,12 @@ class HaEntities:
                if e.platform == self.domain and e.domain in ENTITY_DOMAINS and not e.disabled_by]
         return sorted(out, key=lambda e: e.entity_id)
 
-    def snapshot(self) -> dict:
+    def snapshot(self, keys=None) -> dict:
         vals, size = {}, 0
+        keys = {str(k).lower() for k in keys} if keys else None
         for e in self.entities():
+            if keys is not None and not key_match(e.unique_id, keys, self.prefix):
+                continue
             st = self._hass.states.get(e.entity_id)
             if st is None or st.state in (STATE_UNAVAILABLE, STATE_UNKNOWN, ''):
                 continue
@@ -68,7 +82,7 @@ class HaEntities:
     def read_item(self, item: dict) -> dict | None:
         if str(item.get('integration') or self.domain) != self.domain:
             return None                              # položka pro jinou integraci, než má tahle položka HA
-        out = {'values': self.snapshot()}
+        out = {'values': self.snapshot(item.get('keys'))}
         if self.prefix:
             out['prefix'] = self.prefix
         return out
