@@ -14,7 +14,8 @@ Položka „blok“ (s `fields`): {name, addr, count, fields: [{off, count=1, mi
 počítá klient). `never` = registry, které klient nezapíše nikdy, ať profil říká cokoli.
 Kontroly: min/max (když jsou) A pojmenovaná `check`:
   range (jen min/max) · hhmm (HHMM 0000–2359) · mask {mask} (žádný jiný bit) · clock {part: ym|dh|ms} (hodiny
-  Deye: rok|měsíc, den|hodina, minuta|sekunda) · enum {values} · zero (jen 0) · s32 / u32 {words: lo-hi|hi-lo}
+  Deye: rok|měsíc, den|hodina, minuta|sekunda) · enum {values} · zero (jen 0) · s16 (jeden registr se znaménkem,
+  min/max povinné) · s32 / u32 {words: lo-hi|hi-lo}
   (dva registry, min/max na celé číslo).
 Neznámá kontrola, překryv položek nebo nepokrytý blok = profil neplatný (ValueError) → klient nic nezapíše.
 
@@ -32,7 +33,7 @@ import re
 
 ID_RE = re.compile(r'^[a-z0-9][a-z0-9-]{0,40}@[0-9]{1,4}$')
 MAX_BLOCK = 123                       # FC16: nejvýš 123 registrů
-_REG_CHECKS = ('range', 'hhmm', 'mask', 'clock', 'enum', 'zero')
+_REG_CHECKS = ('range', 'hhmm', 'mask', 'clock', 'enum', 'zero', 's16')
 _WIDE_CHECKS = ('s32', 'u32')
 _PATH_TOKEN = re.compile(r'(\{[^{}]*\})')
 _PATH_RANGE = re.compile(r'\{([0-9]{1,4})\.\.([0-9]{1,4})\}')
@@ -86,6 +87,11 @@ def _reg_check(spec: dict, what: str):
         extra = lambda v: v in vals
     elif name == 'zero':
         extra = lambda v: v == 0
+    elif name == 's16':
+        if lo is None or hi is None:
+            raise ValueError(f'{what}: s16 potřebuje min i max')
+        slo, shi, lo, hi = lo, hi, None, None          # meze platí pro hodnotu se znaménkem, ne pro u16
+        extra = lambda v: slo <= (v - 0x10000 if v & 0x8000 else v) <= shi
     else:
         raise ValueError(f'{what}: neznámá kontrola {name!r}')
 
