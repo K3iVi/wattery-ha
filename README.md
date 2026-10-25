@@ -14,6 +14,9 @@ data do wattery — rychleji a spolehlivěji než přes výrobcův cloud.
 2. HACS → tři tečky vpravo nahoře → **Vlastní repozitáře** → `https://github.com/K3iVi/wattery-ha`, typ **Integrace**.
 3. Najděte **wattery** → Stáhnout → restartujte Home Assistant.
 4. V aplikaci wattery: **Nastavení → Lokální spojení → Spárovat zařízení** — zobrazí se kód (platí 15 minut).
+   Účet ve wattery ještě nemáte, nebo nemáte Deye Cloud? Zaregistrujte se na [spot.wattery.cz](https://spot.wattery.cz/register)
+   a v úvodu zvolte **Připojit střídač bez cloudu** (u střídače Deye) — wattery založí elektrárnu a ukáže kód. Data
+   i pokyny wattery pak jdou jen přes Home Assistant.
 5. V Home Assistantu: **Nastavení → Zařízení a služby → Přidat integraci → wattery** → zvolte, jak se zařízení
    čte (Deye přes Solarman, Victron GX, Solax přes LAN dongle, nebo jen čtení z jiné integrace — viz 0.5.0), zadejte kód a vyberte zařízení.
 
@@ -133,7 +136,9 @@ Local connection between a solar plant and the [wattery](https://monitoring.watt
 reads the inverter on the local network via [ha-solarman](https://github.com/davidrapan/ha-solarman) and sends
 raw registers to wattery; the server decides which registers to read (no update needed for new values).
 Install via HACS (custom repository, category Integration), then add the **wattery** integration with a pairing
-code from the wattery app.
+code from the wattery app. No Deye Cloud account? Register at [spot.wattery.cz](https://spot.wattery.cz/register) and
+choose **Připojit střídač bez cloudu** (Deye inverters) — wattery creates the plant and shows the code; data and
+wattery's commands then go through Home Assistant only.
 
 **Control (0.2.0+, off by default):** the *Control from wattery* switch lets wattery send its spot-trading commands
 (TOU windows, charge currents, max export power, Low Batt SOC, inverter clock) through Home Assistant instead of the
