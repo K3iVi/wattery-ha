@@ -11,6 +11,8 @@ data do wattery — rychleji a spolehlivěji než přes výrobcův cloud.
 ## Instalace
 
 1. Mějte nastavenou integraci **Solarman** (ha-solarman) se svým střídačem.
+   Novější loggery Deye se sériovým číslem začínajícím **D** (fungují jen s Deye Cloud, ne se Solarmanem) se na
+   starším softwaru loggeru po síti číst nedají — požádejte podporu Deye o aktualizaci softwaru loggeru.
 2. HACS → tři tečky vpravo nahoře → **Vlastní repozitáře** → `https://github.com/K3iVi/wattery-ha`, typ **Integrace**.
 3. Najděte **wattery** → Stáhnout → restartujte Home Assistant.
 4. V aplikaci wattery: **Nastavení → Lokální spojení → Spárovat zařízení** — zobrazí se kód (platí 15 minut).
@@ -139,6 +141,8 @@ Install via HACS (custom repository, category Integration), then add the **watte
 code from the wattery app. No Deye Cloud account? Register at [spot.wattery.cz](https://spot.wattery.cz/register) and
 choose **Připojit střídač bez cloudu** (Deye inverters) — wattery creates the plant and shows the code; data and
 wattery's commands then go through Home Assistant only.
+Newer Deye loggers with a serial number starting with **D** (Deye Cloud only, not Solarman) cannot be read over the
+local network on older logger software — ask Deye support to update the logger software first.
 
 **Control (0.2.0+, off by default):** the *Control from wattery* switch lets wattery send its spot-trading commands
 (TOU windows, charge currents, max export power, Low Batt SOC, inverter clock) through Home Assistant instead of the
